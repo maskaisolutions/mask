@@ -9,19 +9,19 @@ and Pydantic models.
 
 from typing import Any
 
-from mask.core.vault import _decode_lenient
+from mask.core.vault import _decode_lenient, detokenize_text
 from mask.core.fpe import looks_like_token
 from mask.core.scanner import get_scanner
 
 
 def deep_decode(obj: Any) -> Any:
-    """Walk *obj* recursively and detokenise every value that looks like a Mask token."""
+    """Walk *obj* recursively and detokenise all Mask tokens found.
+    
+    This handles both 1:1 token matches and tokens embedded within larger
+    paragraphs (sub-string detokenization).
+    """
     if isinstance(obj, str):
-        if looks_like_token(obj):
-            # Use lenient decode semantics: resolve known tokens to plaintext,
-            # but leave unknown/expired tokens untouched.
-            return _decode_lenient(obj)
-        return obj
+        return detokenize_text(obj)
     if isinstance(obj, dict):
         return {k: deep_decode(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):

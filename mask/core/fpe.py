@@ -139,6 +139,18 @@ def generate_fpe_token(raw_text: str) -> str:
     return f"[TKN-{_hmac_hex(text)}]"
 
 
+# Regex that matches ANY valid Mask token.
+# Used for sub-string detokenization (finding tokens inside paragraphs).
+TOKEN_PATTERN = re.compile(
+    r"tkn-[a-f0-9]{8,64}@email\.com"              # Email
+    r"|\+1-555-\d{7}"                             # Phone
+    r"|000-00-\d{4}"                            # SSN
+    r"|4000-0000-0000-\d{4}"                    # CC
+    r"|000000\d{3}"                             # Routing
+    r"|\[TKN-[a-f0-9]{8,64}\]"                   # Opaque
+)
+
+
 def looks_like_token(value: str) -> bool:
     """Heuristic: return True if *value* appears to be a Mask token.
 

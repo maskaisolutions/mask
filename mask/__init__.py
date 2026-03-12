@@ -6,9 +6,17 @@ Provides format-preserving encryption, local/distributed vaulting,
 and framework-agnostic tool interception hooks.
 """
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
-from mask.core.vault import get_vault, encode, decode, aencode, adecode
+from mask.core.vault import (
+    get_vault,
+    encode,
+    decode,
+    aencode,
+    adecode,
+    detokenize_text,
+    adetokenize_text,
+)
 from mask.core.fpe import generate_fpe_token, looks_like_token, reset_master_key
 
 # --- Public API: Expose entity detection with confidence scores ---
@@ -76,6 +84,8 @@ __all__ = [
     "decode",
     "aencode",
     "adecode",
+    "detokenize_text",
+    "adetokenize_text",
     "generate_fpe_token",
     "looks_like_token",
     "reset_master_key",

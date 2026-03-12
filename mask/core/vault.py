@@ -438,3 +438,30 @@ async def aencode(raw_text: str, *, ttl: Optional[int] = None) -> str:
 async def adecode(token: str) -> str:
     """Async wrapper for ``decode()``."""
     return await asyncio.to_thread(decode, token)
+
+
+import re
+
+
+def detokenize_text(text: str) -> str:
+    """Find all Mask tokens within *text* and replace them with their original plaintext.
+
+    Unlike ``decode()``, this works on entire paragraphs/messages containing
+    embedded tokens (e.g. email bodies). Uses lenient detokenization: if a
+    token is unknown or expired, it is left as-is.
+    """
+    if not text or not isinstance(text, str):
+        return text
+
+    from mask.core.fpe import TOKEN_PATTERN
+
+    def _replace(match: re.Match) -> str:
+        token = match.group(0)
+        return _decode_lenient(token)
+
+    return TOKEN_PATTERN.sub(_replace, text)
+
+
+async def adetokenize_text(text: str) -> str:
+    """Async wrapper for ``detokenize_text()``."""
+    return await asyncio.to_thread(detokenize_text, text)

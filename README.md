@@ -104,6 +104,9 @@ For zero-trust environments, `MASK_ENCRYPTION_KEY` no longer needs to live in a 
 ### 6. Remote NLP Scanning
 Performance-sensitive deployments can now offload the ~500MB spaCy NLP model to a centralized Presidio Analyzer service using the new `RemotePresidioScanner`. This permits "lightweight" edge agents (e.g., Lambda functions) to run Mask with near-zero memory footprint.
 
+### 7. Sub-string Detokenization
+Mask v0.3.3 introduces the "Final Boss" fix: the ability to detokenize PII embedded within larger text blocks (like email bodies or chat messages). While previous versions only handled 1:1 token matches, `detokenize_text()` uses high-performance regex to find and restore all tokens within a paragraph before they hit your tools.
+
 ## Installation and Setup
 
 Install the Data Plane core SDK. Core features require cryptography and Presidio; Redis/Dynamo/Memcached/LangChain/LlamaIndex/ADK remain optional extras:
@@ -351,6 +354,11 @@ In this mode, events are still emitted via the logger but never persisted to
 `.mask_audit.db` on disk.
 
 ---
+
+### v0.3.3 - Sub-string Detokenization (The "Final Boss")
+- **Sub-string Support**: Added `detokenize_text()` and `adetokenize_text()` to find and replace tokens embedded within larger paragraphs.
+- **Recursive Decoding Update**: `deep_decode()` now uses sub-string detokenization by default, ensuring email bodies and chat messages are fully detokenized before reaching tools.
+- **Reliability**: Verified with 74+ tests covering all edge cases.
 
 ### v0.3.2 - Enterprise Architectural Rebuild
 - **Async Support**: Native `async` wrappers for all core APIs (`aencode`, `adecode`, `ascan_and_tokenize`).

@@ -7,7 +7,7 @@ bundles vault, crypto, scanner, and audit logger into a single object.
 
 from typing import Optional, Dict, Any
 
-from mask.core.vault import get_vault, BaseVault, _hash_plaintext
+from mask.core.vault import get_vault, BaseVault, _hash_plaintext, detokenize_text
 from mask.core.crypto import get_crypto_engine, CryptoEngine
 from mask.core.scanner import get_scanner, PresidioScanner
 from mask.core.fpe import generate_fpe_token, looks_like_token
@@ -118,3 +118,12 @@ class MaskClient:
         """Async wrapper for ``scan_and_tokenize()``."""
         import asyncio
         return await asyncio.to_thread(self.scan_and_tokenize, text)
+
+    def detokenize_text(self, text: str) -> str:
+        """Find and replace all tokens within *text* with their plaintext."""
+        return detokenize_text(text)
+
+    async def adetokenize_text(self, text: str) -> str:
+        """Async wrapper for ``detokenize_text()``."""
+        import asyncio
+        return await asyncio.to_thread(self.detokenize_text, text)
