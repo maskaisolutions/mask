@@ -18,7 +18,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Tuple
 
-from mask.core.fpe import generate_fpe_token
+from mask.core.fpe import generate_fpe_token, looks_like_token
 from mask.core.crypto import get_crypto_engine
 
 logger = logging.getLogger("mask.vault")
@@ -350,6 +350,9 @@ def encode(raw_text: str, *, ttl: Optional[int] = None) -> str:
     """Tokenise *raw_text*, encrypt it, store in vault, return the FPE token.
     If *raw_text* has already been tokenised and is active, returns the existing token.
     """
+    if looks_like_token(raw_text):
+        return raw_text
+
     vault = get_vault()
     pt_hash = _hash_plaintext(raw_text)
     

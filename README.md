@@ -311,6 +311,15 @@ In this mode, events are still emitted via the logger but never persisted to
 
 ---
 
+## Release Notes
+
+### v0.3.1 - Fix "Privacy Inception" Bug
+- **Added Token Guard to `vault.encode()`**: Prevents double-masking of previously generated tokens when directly calling the vault.
+- **Improved Scanner Intelligence**: Updated tiered waterfall scanner to automatically skip strings that match the `looks_like_token` heuristic.
+- **Enhanced Recursive Reliability**: Resolves the "Inception" loop where tokens were treated as PII in nested tool call loops.
+
+---
+
 ## License
 
 This project is licensed under the Apache License, Version 2.0 - see the [LICENSE](LICENSE) file for details.

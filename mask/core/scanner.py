@@ -30,7 +30,7 @@ except ImportError:
     )
 
 from mask.core.vault import encode
-from mask.core.fpe import generate_fpe_token
+from mask.core.fpe import generate_fpe_token, looks_like_token
 
 logger = logging.getLogger("mask.scanner")
 
@@ -145,7 +145,7 @@ class PresidioScanner:
 
         # Replace from right to left to preserve offsets
         for start, end, etype, val, conf in reversed(filtered):
-            if conf >= confidence_threshold:
+            if conf >= confidence_threshold and not looks_like_token(val):
                 token = encode_fn(val)
                 excised = excised[:start] + token + excised[end:]
                 entities.append({
@@ -182,7 +182,7 @@ class PresidioScanner:
                 confidence = min(1.0, confidence + 0.2)
 
             val = text[r.start:r.end]
-            if confidence >= confidence_threshold:
+            if confidence >= confidence_threshold and not looks_like_token(val):
                 token = encode_fn(val)
                 masked_text = masked_text[:r.start] + token + masked_text[r.end:]
                 entities.append({
