@@ -95,7 +95,14 @@ It is catastrophic if an SDK misidentifies a user's *real* SSN as a "token" and 
 * Credit Card tokens use the `4000-0000-0000` Visa reserved test BIN. 
 By generating statistically impossible tokens, Mask guarantees it will never accidentally swallow real PII.
 
----
+### 4. Enterprise Async Support
+Mask v0.3.2 introduces native `asyncio` wrappers for all core operations. Calling `aencode()`, `adecode()`, or `ascan_and_tokenize()` allows high-throughput ASGI applications (FastAPI, Quart) to handle PII tokenization without blocking the event loop on cryptographic CPU tasks.
+
+### 5. Pluggable Key Providers (AWS KMS / HashiCorp Vault)
+For zero-trust environments, `MASK_ENCRYPTION_KEY` no longer needs to live in a static environment variable. Developers can now inject a `BaseKeyProvider` to fetch secrets dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault at runtime.
+
+### 6. Remote NLP Scanning
+Performance-sensitive deployments can now offload the ~500MB spaCy NLP model to a centralized Presidio Analyzer service using the new `RemotePresidioScanner`. This permits "lightweight" edge agents (e.g., Lambda functions) to run Mask with near-zero memory footprint.
 
 ## Installation and Setup
 
@@ -134,18 +141,38 @@ python -m spacy download en_core_web_lg
 ```
 
 
+### Async & Remote Scanner Support
+v0.3.2 adds `httpx` as an optional dependency for remote scanning. If you intend to use the `RemotePresidioScanner`, install the extra:
+```bash
+pip install "maskcloud[remote]"
+```
+
 ### Environment Configuration
 
 Before running your agents, Mask requires an encryption key and a vault backend selection.
 
+#### 1. Configure Key Source
+By default, Mask reads from environment variables.
 ```bash
-# 1. Provide your encryption key
-# Generate a static key for local development:
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Provide your encryption key
 export MASK_ENCRYPTION_KEY="..."
-# For Cloud Platform users, the KMS can securely distribute this upon initialization.
+export MASK_MASTER_KEY="..."
+```
 
-# 2. Select your vault type
+For Enterprise Key Management, set a custom provider in code:
+```python
+from mask.core.key_provider import set_key_provider, AwsKmsKeyProvider
+set_key_provider(AwsKmsKeyProvider(key_id="alias/mask"))
+```
+
+#### 2. Select Scanner Type
+```bash
+# Options: local (default), remote
+export MASK_SCANNER_TYPE=remote
+export MASK_SCANNER_URL=http://presidio-analyzer:5001/analyze
+```
+
+#### 3. Select vault type
 export MASK_VAULT_TYPE=redis      # Options: memory, redis, dynamodb, memcached, cloud
 
 # 3. Configure your chosen vault backend
@@ -167,6 +194,20 @@ deployments where one global vault and key serve a single financial institution
 or environment.
 
 ---
+
+### 1. Unified Async API
+All core methods now have non-blocking async variants for use in FastAPI/ASGI environments.
+```python
+import asyncio
+from mask import aencode, adecode, ascan_and_tokenize
+
+async def main():
+    token = await aencode("alice@example.com")
+    text = await ascan_and_tokenize("Contact " + token)
+    print(text)
+
+asyncio.run(main())
+```
 
 ## Framework Integrations
 
@@ -311,7 +352,13 @@ In this mode, events are still emitted via the logger but never persisted to
 
 ---
 
-## Release Notes
+### v0.3.2 - Enterprise Architectural Rebuild
+- **Async Support**: Native `async` wrappers for all core APIs (`aencode`, `adecode`, `ascan_and_tokenize`).
+- **Pluggable Key Providers**: Added `key_provider.py` abstraction for AWS KMS and HashiCorp Vault.
+- **Remote NLP Scanner**: `RemotePresidioScanner` offloads detection to a remote API, enabling model-less lightweight deployments.
+- **Critical Fixes**: 
+    - Resolved "Inception" recursive double-masking bug via `looks_like_token` guard.
+    - Fixed whitespace-sensitive deduplication edge case by normalizing input strings.
 
 ### v0.3.1 - Fix "Privacy Inception" Bug
 - **Added Token Guard to `vault.encode()`**: Prevents double-masking of previously generated tokens when directly calling the vault.

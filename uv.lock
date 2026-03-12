@@ -2320,7 +2320,7 @@ wheels = [
 
 [[package]]
 name = "maskcloud"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -2336,6 +2336,7 @@ adk = [
 all = [
     { name = "boto3" },
     { name = "google-adk" },
+    { name = "httpx" },
     { name = "langchain-core" },
     { name = "llama-index-core" },
     { name = "pymemcache" },
@@ -2371,6 +2372,9 @@ memcached = [
 redis = [
     { name = "redis" },
 ]
+remote = [
+    { name = "httpx" },
+]
 sm = [
     { name = "spacy" },
 ]
@@ -2398,7 +2402,9 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'examples'", specifier = ">=0.111" },
     { name = "google-adk", marker = "extra == 'adk'", specifier = ">=1.0" },
     { name = "google-adk", marker = "extra == 'all'", specifier = ">=1.0" },
+    { name = "httpx", marker = "extra == 'all'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'examples'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'remote'", specifier = ">=0.27" },
     { name = "langchain-core", marker = "extra == 'all'", specifier = ">=0.2" },
     { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.2" },
     { name = "litellm", marker = "extra == 'examples'", specifier = ">=1.74" },
@@ -2420,7 +2426,7 @@ requires-dist = [
     { name = "spacy", marker = "extra == 'spacy'", specifier = ">=3.4.4" },
     { name = "uvicorn", marker = "extra == 'examples'", specifier = ">=0.30" },
 ]
-provides-extras = ["redis", "dynamodb", "memcached", "adk", "langchain", "llamaindex", "spacy", "sm", "md", "lg", "all", "examples"]
+provides-extras = ["redis", "dynamodb", "memcached", "adk", "langchain", "llamaindex", "spacy", "sm", "md", "lg", "remote", "all", "examples"]
 
 [package.metadata.requires-dev]
 dev = [

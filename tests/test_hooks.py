@@ -93,10 +93,11 @@ class TestEncryptAfterTool:
         assert "@email.com" in result
         assert "support@example.com" not in result
 
-    def test_encodes_leaked_emails_in_list_response(self):
-        args = ["user1@domain.com", "user2@domain.com", 42]
+    def test_encodes_leaked_emails_but_skips_tokens_in_nested_dict(self):
+        token = encode("admin@secure.io")
+        args = {"response": {"leaked": "bad@plain.com", "safe": token}}
         result = _deep_encode_pii(args)
-        assert isinstance(result, list)
-        assert looks_like_token(result[0])
-        assert looks_like_token(result[1])
-        assert result[2] == 42
+        
+        assert looks_like_token(result["response"]["leaked"])
+        assert result["response"]["safe"] == token  # Guarded against double masking
+

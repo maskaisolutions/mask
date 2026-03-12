@@ -6,13 +6,13 @@ Provides format-preserving encryption, local/distributed vaulting,
 and framework-agnostic tool interception hooks.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.2"
 
-from mask.core.vault import get_vault, encode, decode
+from mask.core.vault import get_vault, encode, decode, aencode, adecode
 from mask.core.fpe import generate_fpe_token, looks_like_token, reset_master_key
 
 # --- Public API: Expose entity detection with confidence scores ---
-from mask.core.scanner import get_scanner
+from mask.core.scanner import get_scanner, RemotePresidioScanner
 
 
 def detect_entities_with_confidence(
@@ -25,6 +25,24 @@ def detect_entities_with_confidence(
     """Detect PII entities in text and return a list of dicts with type, value, method, confidence, and masked_value."""
     scanner = get_scanner()
     return scanner.scan_and_return_entities(
+        text,
+        pipeline=pipeline,
+        confidence_threshold=confidence_threshold,
+        context=context,
+        aggressive=aggressive,
+    )
+
+
+async def ascan_and_tokenize(
+    text,
+    pipeline=None,
+    confidence_threshold=0.7,
+    context=None,
+    aggressive=False,
+):
+    """Async variant of get_scanner().scan_and_tokenize()."""
+    scanner = get_scanner()
+    return await scanner.ascan_and_tokenize(
         text,
         pipeline=pipeline,
         confidence_threshold=confidence_threshold,
@@ -56,10 +74,13 @@ __all__ = [
     "get_vault",
     "encode",
     "decode",
+    "aencode",
+    "adecode",
     "generate_fpe_token",
     "looks_like_token",
     "reset_master_key",
     "detect_entities_with_confidence",
+    "ascan_and_tokenize",
     "MaskClient",
     "secure_tool",
 ]

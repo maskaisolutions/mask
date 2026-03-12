@@ -96,6 +96,18 @@ class TestEncodeDecodePublicAPI:
         token3 = encode("other@example.com")
         assert token1 != token3
 
+    def test_encode_skips_existing_tokens(self):
+        """Token guard: encoding a token returns the token itself (prevents double masking)."""
+        token1 = encode("alice@example.com")
+        token2 = encode(token1)
+        assert token1 == token2
+        
+    def test_dedup_ignores_whitespace(self):
+        """Whitespace normalisation ensures ' Alice ' and 'Alice' get same hash/token."""
+        token1 = encode(" bob@example.com ")
+        token2 = encode("bob@example.com")
+        assert token1 == token2
+        
     def test_memory_vault_thread_safety(self):
         import threading
         v = MemoryVault()

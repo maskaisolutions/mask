@@ -37,13 +37,12 @@ _master_key: Optional[bytes] = None
 
 
 def _get_master_key() -> bytes:
-    """Return the HMAC master key, lazily initialised from the environment."""
+    """Return the HMAC master key, lazily initialised from the key provider."""
     global _master_key
     if _master_key is None:
-        raw = os.environ.get("MASK_MASTER_KEY", "")
-        if not raw:
-            # Fall back to the Fernet encryption key for convenience
-            raw = os.environ.get("MASK_ENCRYPTION_KEY", "")
+        from mask.core.key_provider import get_key_provider
+
+        raw = get_key_provider().get_master_key() or ""
         if not raw:
             # Auto-generate a session-local key (non-persistent)
             import secrets

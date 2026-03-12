@@ -273,6 +273,85 @@ class PresidioScanner:
 
         return all_entities
 
+    async def ascan_and_tokenize(
+        self,
+        text: str,
+        encode_fn: Optional[Callable[[str], str]] = None,
+        pipeline: Optional[List[str]] = None,
+        confidence_threshold: float = 0.7,
+        context: Optional[str] = None,
+        aggressive: bool = False,
+    ) -> str:
+        """Async wrapper for ``scan_and_tokenize``."""
+        import asyncio
+        return await asyncio.to_thread(
+            self.scan_and_tokenize,
+            text, encode_fn, pipeline, confidence_threshold, context, aggressive
+        )
+
+
+class RemotePresidioScanner(PresidioScanner):
+    """Scanner that calls a remote Presidio Analyzer endpoint.
+
+    This avoids loading the ~500MB spaCy model into the application process.
+    Requires ``httpx`` to be installed.
+    """
+
+    def __init__(self, endpoint_url: str) -> None:
+        try:
+            import httpx
+        except ImportError:
+            raise ImportError(
+                "The 'httpx' package is required for RemotePresidioScanner. "
+                "Install it with: pip install httpx"
+            )
+        self.endpoint_url = endpoint_url
+        self._httpx = httpx
+        logger.info("Using RemotePresidioScanner at %s", endpoint_url)
+
+    def _tier2_nlp(
+        self,
+        text: str,
+        encode_fn: Callable[[str], str],
+        boost_entities: frozenset,
+        aggressive: bool,
+        confidence_threshold: float,
+    ) -> tuple[str, List[Dict]]:
+        entities: List[Dict] = []
+        try:
+            resp = self._httpx.post(
+                self.endpoint_url,
+                json={"text": text, "language": "en"}
+            )
+            resp.raise_for_status()
+            results = resp.json()
+        except Exception as e:
+            logger.error("Remote NLP scan failed: %s", e)
+            return text, []
+
+        masked_text = text
+        # Assuming the standard Presidio API schema
+        results.sort(key=lambda r: r.get("start", 0), reverse=True)
+        for r in results:
+            start, end, entity_type = r["start"], r["end"], r["entity_type"]
+            confidence = r.get("score", 0.7)
+            if aggressive or entity_type.lower().replace("_", " ") in boost_entities:
+                confidence = min(1.0, confidence + 0.2)
+
+            val = text[start:end]
+            if confidence >= confidence_threshold and not looks_like_token(val):
+                token = encode_fn(val)
+                masked_text = masked_text[:start] + token + masked_text[end:]
+                entities.append({
+                    "type": entity_type,
+                    "value": val,
+                    "method": "nlp-remote",
+                    "confidence": confidence,
+                    "masked_value": token,
+                })
+
+        return masked_text, entities
+
 
 # Thread-safe singleton
 
@@ -286,5 +365,11 @@ def get_scanner() -> PresidioScanner:
     if _scanner_instance is None:
         with _scanner_lock:
             if _scanner_instance is None:
-                _scanner_instance = PresidioScanner()
+                import os
+                scanner_type = os.environ.get("MASK_SCANNER_TYPE", "local").lower()
+                if scanner_type == "remote":
+                    url = os.environ.get("MASK_SCANNER_URL", "http://localhost:5001/analyze")
+                    _scanner_instance = RemotePresidioScanner(url)
+                else:
+                    _scanner_instance = PresidioScanner()
     return _scanner_instance

@@ -87,7 +87,10 @@ class TestFPETokenGeneration:
             "John Doe",
         ]:
             assert generate_fpe_token(value) == generate_fpe_token(value)
-
+            
+    def test_whitespace_stripped_determinism(self):
+        """Tokens are generated with whitespace stripped, creating deterministic outcomes."""
+        assert generate_fpe_token(" someone@email.com ") == generate_fpe_token("someone@email.com")
 
 class TestLooksLikeToken:
     def test_email_token(self):

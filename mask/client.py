@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 from mask.core.vault import get_vault, BaseVault, _hash_plaintext
 from mask.core.crypto import get_crypto_engine, CryptoEngine
 from mask.core.scanner import get_scanner, PresidioScanner
-from mask.core.fpe import generate_fpe_token
+from mask.core.fpe import generate_fpe_token, looks_like_token
 from mask.telemetry.audit_logger import get_audit_logger, AuditLogger
 
 
@@ -58,6 +58,13 @@ class MaskClient:
         Includes deduplication: if the same plaintext has been encoded
         before and the token is still active, the existing token is returned.
         """
+        # Token Guard: never re-encode a value that is already a Mask token
+        if looks_like_token(raw_text):
+            return raw_text
+
+        # Normalise whitespace so " Alice " and "Alice" share the same hash
+        raw_text = raw_text.strip()
+
         pt_hash = _hash_plaintext(raw_text)
 
         # 1. Deduplication check
@@ -96,3 +103,18 @@ class MaskClient:
     def scan_and_tokenize(self, text: str) -> str:
         """Scan text using the Waterfall pipeline and replace PII with FPE tokens."""
         return self.scanner.scan_and_tokenize(text, encode_fn=self.encode)
+
+    async def aencode(self, raw_text: str) -> str:
+        """Async wrapper for ``encode()``."""
+        import asyncio
+        return await asyncio.to_thread(self.encode, raw_text)
+
+    async def adecode(self, token: str) -> str:
+        """Async wrapper for ``decode()``."""
+        import asyncio
+        return await asyncio.to_thread(self.decode, token)
+
+    async def ascan_and_tokenize(self, text: str) -> str:
+        """Async wrapper for ``scan_and_tokenize()``."""
+        import asyncio
+        return await asyncio.to_thread(self.scan_and_tokenize, text)

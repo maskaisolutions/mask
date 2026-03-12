@@ -41,8 +41,12 @@ class BaseVault(ABC):
         """Return the plaintext for *token*, or None if missing/expired."""
 
 def _hash_plaintext(plaintext: str) -> str:
-    """Helper to deterministically hash plaintext for reverse lookups in distributed vaults."""
-    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+    """Helper to deterministically hash plaintext for reverse lookups in distributed vaults.
+
+    Whitespace is stripped before hashing so that ``" Alice "`` and ``"Alice"``
+    produce the same hash — matching the normalisation done by ``generate_fpe_token``.
+    """
+    return hashlib.sha256(plaintext.strip().encode("utf-8")).hexdigest()
 
 
 # In-memory implementation (single-process, dev / testing)
@@ -353,6 +357,9 @@ def encode(raw_text: str, *, ttl: Optional[int] = None) -> str:
     if looks_like_token(raw_text):
         return raw_text
 
+    # Normalise whitespace to match generate_fpe_token() and _hash_plaintext()
+    raw_text = raw_text.strip()
+
     vault = get_vault()
     pt_hash = _hash_plaintext(raw_text)
     
@@ -418,3 +425,16 @@ def _decode_lenient(token: str) -> str:
         return decode(token)
     except DecodeError:
         return token
+
+
+import asyncio
+
+
+async def aencode(raw_text: str, *, ttl: Optional[int] = None) -> str:
+    """Async wrapper for ``encode()``."""
+    return await asyncio.to_thread(encode, raw_text, ttl=ttl)
+
+
+async def adecode(token: str) -> str:
+    """Async wrapper for ``decode()``."""
+    return await asyncio.to_thread(decode, token)

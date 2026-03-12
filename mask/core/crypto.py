@@ -40,9 +40,14 @@ class CryptoEngine:
 
     def _init(self) -> None:
         """Initialize the underlying Fernet engine.
-        If MASK_ENCRYPTION_KEY is not set, auto-generate a throwaway key for local/test/demo use.
+
+        The encryption key is retrieved from the active ``KeyProvider``.
+        If no key is available, a throwaway key is auto-generated for
+        local/test/demo use.
         """
-        key = os.environ.get("MASK_ENCRYPTION_KEY")
+        from mask.core.key_provider import get_key_provider
+
+        key = get_key_provider().get_encryption_key()
         if not key:
             key = Fernet.generate_key().decode("utf-8")
             os.environ["MASK_ENCRYPTION_KEY"] = key
