@@ -67,8 +67,8 @@ The Control Plane manages:
 
 While Mask can be run globally via environment variables, the underlying SDK is highly sophisticated and designed for multi-tenant, zero-trust environments.
 
-### 1. Deterministic Token Deduplication
-Mask vaults use cryptographic hashing to perform reverse-lookups during tokenization. If the LLM generates a prompt containing the same email address 50 times in a single session, Mask retrieves and re-uses the *exact same Format-Preserving Token*. This mathematically prevents vault storage bloat, accelerates encryption performance, and crucially, prevents the LLM from hallucinating due to seeing inconsistent tokens for the same underlying entity.
+### 1. True Deterministic Vaultless FPE
+Mask utilizes **Deterministic Format-Preserving Encryption (HMAC-SHA256)** for structured PII. If the LLM generates a prompt containing the same email address 50 times in a single session, Mask generates the *exact same Format-Preserving Token* every time. This mathematically accelerates encryption performance and crucially, prevents the LLM from hallucinating due to seeing inconsistent tokens for the same underlying entity, preserving critical reasoning context without exposing real data to the model. Structured data like Emails, Phones, and SSNs do not even require vault storage, guaranteeing infinite horizontal scalability.
 
 ### 2. The Explicit `MaskClient` API
 For enterprise backend services handling multiple tenants at once, global singletons (environment configurations) are dangerous. Mask natively supports explicit client instantiation. Developers can isolate vaults, crypto engines, and NLP scanners on a per-request basis.
@@ -175,7 +175,30 @@ Mask integrates seamlessly by injecting dynamic, recursive hooks into your agent
 * **Post-Hooks (Encoding)**: Scans data returning from the tool, encrypts any raw PII found, and hands the tokens back to the LLM.
 
 ### 1. LangChain
-To protect tool outputs, you must wrap tools with MaskToolWrapper. The callback handler is for logging/audit only.
+Mask integrates with LangChain via our explicit `@secure_tool` decorator.
+
+#### Option A: Explicit Decorator (Recommended)
+```python
+from mask.integrations.langchain_hooks import secure_tool
+
+@secure_tool
+def send_email_tool(email: str, message: str) -> str:
+    # `email` is guaranteed to be decrypted back to the real address before execution
+    return send_email_backend(email, message)
+    # The return string is automatically scanned, and any PII emitted is encrypted into tokens
+```
+
+#### Option B: Magic Hooks (Deprecated)
+```python
+from mask.integrations.langchain_hooks import mask_langchain_hooks
+
+# Note: Deprecated in v0.3.0, to be removed in v1.0
+with mask_langchain_hooks():
+    # All tools used within this block are automatically protected
+    agent_executor.invoke({"input": "Contact alice@example.com"})
+```
+
+#### Option B: Explicit Wrapper
 ```python
 from langchain.agents import AgentExecutor
 from mask.integrations.langchain_hooks import MaskCallbackHandler, MaskToolWrapper
@@ -192,7 +215,18 @@ agent_executor = AgentExecutor(
 ```
 
 ### 2. LlamaIndex
-Use MaskToolWrapper and/or MaskCallbackHandler to ensure inputs are detokenized and outputs are re-tokenized.
+Use the magic context manager or explicit wrappers.
+
+#### Option A: Magic Hooks
+```python
+from mask.integrations.llamaindex_hooks import mask_llamaindex_hooks
+
+with mask_llamaindex_hooks():
+    # Tools called by the query engine will be protected
+    response = query_engine.query("Send email to bob@gmail.com")
+```
+
+#### Option B: Explicit Wrapper
 ```python
 from llama_index.core.tools import FunctionTool
 from mask.integrations.llamaindex_hooks import MaskToolWrapper

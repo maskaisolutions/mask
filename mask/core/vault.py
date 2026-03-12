@@ -23,9 +23,7 @@ from mask.core.crypto import get_crypto_engine
 
 logger = logging.getLogger("mask.vault")
 
-# ---------------------------------------------------------------------------
 # Abstract base
-# ---------------------------------------------------------------------------
 
 class BaseVault(ABC):
     """Interface every vault backend must implement."""
@@ -47,9 +45,7 @@ def _hash_plaintext(plaintext: str) -> str:
     return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
 # In-memory implementation (single-process, dev / testing)
-# ---------------------------------------------------------------------------
 
 class MemoryVault(BaseVault):
     """Dict-backed vault.  Fast, but state is lost across processes. Thread-safe."""
@@ -108,9 +104,7 @@ class MemoryVault(BaseVault):
                     del self._reverse_store[pt_hash]
 
 
-# ---------------------------------------------------------------------------
 # Redis implementation (multi-pod, production)
-# ---------------------------------------------------------------------------
 
 class RedisVault(BaseVault):
     """Redis-backed vault for horizontally scaled deployments.
@@ -171,9 +165,7 @@ class RedisVault(BaseVault):
         pipe.execute()
 
 
-# ---------------------------------------------------------------------------
 # DynamoDB implementation (AWS-native enterprises)
-# ---------------------------------------------------------------------------
 
 class DynamoDBVault(BaseVault):
     """AWS DynamoDB-backed vault for AWS-native enterprise deployments.
@@ -254,9 +246,7 @@ class DynamoDBVault(BaseVault):
         self._table.delete_item(Key={"token": f"mask:{token}"})
 
 
-# ---------------------------------------------------------------------------
 # Memcached implementation (lightweight distributed cache)
-# ---------------------------------------------------------------------------
 
 class MemcachedVault(BaseVault):
     """Memcached-backed vault as a lightweight alternative to Redis.
@@ -319,9 +309,7 @@ class MemcachedVault(BaseVault):
             self._client.delete(f"mask-rev:{pt_hash}")
 
 
-# ---------------------------------------------------------------------------
 # Singleton accessor
-# ---------------------------------------------------------------------------
 
 _vault_instance: Optional[BaseVault] = None
 
@@ -356,9 +344,7 @@ def reset_vault() -> None:
     _vault_instance = None
 
 
-# ---------------------------------------------------------------------------
 # Public convenience API  (encode / decode)
-# ---------------------------------------------------------------------------
 
 def encode(raw_text: str, *, ttl: Optional[int] = None) -> str:
     """Tokenise *raw_text*, encrypt it, store in vault, return the FPE token.

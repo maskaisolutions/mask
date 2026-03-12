@@ -39,22 +39,14 @@ class CryptoEngine:
         cls._instance = None
 
     def _init(self) -> None:
-        """Initialise the underlying Fernet engine.
-
-        In all environments (including production and staging), a persistent
-        MASK_ENCRYPTION_KEY **must** be configured. We intentionally do not
-        fall back to an ephemeral key here, because that would make tokens
-        non-recoverable across process restarts and break auditability.
+        """Initialize the underlying Fernet engine.
+        If MASK_ENCRYPTION_KEY is not set, auto-generate a throwaway key for local/test/demo use.
         """
         key = os.environ.get("MASK_ENCRYPTION_KEY")
         if not key:
-            raise RuntimeError(
-                "MASK_ENCRYPTION_KEY is not set. "
-                "Generate a Fernet key with:\n"
-                "  from cryptography.fernet import Fernet\n"
-                "  print(Fernet.generate_key().decode('utf-8'))\n"
-                "and export it as MASK_ENCRYPTION_KEY before starting your agent."
-            )
+            key = Fernet.generate_key().decode("utf-8")
+            os.environ["MASK_ENCRYPTION_KEY"] = key
+            logger.warning("MASK_ENCRYPTION_KEY not set. Using a generated throwaway key. DO NOT USE THIS IN PRODUCTION.")
 
         try:
             self._fernet = Fernet(key.encode("utf-8"))

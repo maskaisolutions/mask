@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "maskcloud"
-version = "0.1.1"
+version = "0.3.0"
 description = "Just-In-Time Privacy Middleware for AI Agents. Format-preserving encryption with pluggable vault backends."
 readme = "README.md"
 requires-python = ">=3.10"

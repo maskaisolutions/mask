@@ -1,8 +1,8 @@
 """
 Explicit Client initialization for the Mask SDK.
 
-Allows creating isolated, explicit configurations instead of relying
-solely on global environment variables and singleton state.
+Provides ``MaskClient`` — a unified, explicitly-configured client that
+bundles vault, crypto, scanner, and audit logger into a single object.
 """
 
 from typing import Optional, Dict, Any
@@ -16,10 +16,18 @@ from mask.telemetry.audit_logger import get_audit_logger, AuditLogger
 
 class MaskClient:
     """Explicitly configured Mask SDK client.
-    
+
     Using this client avoids global singleton state conflicts, making it
-    suitable for multi-tenant applications or environments with complex VPC
-    boundaries.
+    suitable for multi-tenant applications or environments with complex
+    VPC boundaries.
+
+    Usage::
+
+        from mask import MaskClient
+        client = MaskClient(ttl=300)
+        token = client.encode("user@example.com")
+        plaintext = client.decode(token)
+        safe_text = client.scan_and_tokenize("Call me at 555-123-4567")
     """
 
     def __init__(
@@ -28,11 +36,11 @@ class MaskClient:
         crypto: Optional[CryptoEngine] = None,
         scanner: Optional[PresidioScanner] = None,
         audit_logger: Optional[AuditLogger] = None,
-        ttl: int = 600
+        ttl: int = 600,
     ) -> None:
-        """Initialize the client with specific component instances.
-        
-        If an instance is not provided, the client will fall back to using
+        """Initialise the client with specific component instances.
+
+        If an instance is not provided, the client will fall back to
         the standard environment-configured singleton for that component.
         """
         self.vault = vault or get_vault()
@@ -40,33 +48,33 @@ class MaskClient:
         self.scanner = scanner or get_scanner()
         self.logger = audit_logger or get_audit_logger()
         self.ttl = ttl
-        
-        # Ensure the logger is running
+
+        # Ensure the audit logger is running
         self.logger.start()
 
     def encode(self, raw_text: str) -> str:
-        """Tokenize raw_text, encrypt it, and store it in the vault.
-        
-        Includes deduplication: if the same plaintext has been encoded before
-        and the token is still active, the existing token is returned.
+        """Tokenise *raw_text*, encrypt it, and store it in the vault.
+
+        Includes deduplication: if the same plaintext has been encoded
+        before and the token is still active, the existing token is returned.
         """
         pt_hash = _hash_plaintext(raw_text)
-        
+
         # 1. Deduplication check
         existing_token = self.vault.get_token_by_plaintext_hash(pt_hash)
         if existing_token and self.vault.retrieve(existing_token) is not None:
             self.logger.log("encode", existing_token, "opaque")
             return existing_token
-        
-        # 2. Generate new token
+
+        # 2. Generate deterministic token
         token = generate_fpe_token(raw_text)
-        
+
         # 3. Encrypt
         ciphertext = self.crypto.encrypt(raw_text)
-        
+
         # 4. Store with reverse lookup hash
         self.vault.store(token, ciphertext, self.ttl, pt_hash=pt_hash)
-        
+
         self.logger.log("encode", token, "opaque")
         return token
 
@@ -76,7 +84,7 @@ class MaskClient:
         if ciphertext is None:
             self.logger.log("expired", token, "opaque")
             return token
-            
+
         try:
             plaintext = self.crypto.decrypt(ciphertext)
             self.logger.log("decode", token, "opaque")
@@ -86,5 +94,5 @@ class MaskClient:
             return token
 
     def scan_and_tokenize(self, text: str) -> str:
-        """Scan a string using Presidio and replace PII with FPE tokens."""
+        """Scan text using the Waterfall pipeline and replace PII with FPE tokens."""
         return self.scanner.scan_and_tokenize(text, encode_fn=self.encode)

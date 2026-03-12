@@ -22,9 +22,7 @@ from typing import Any, Dict, Optional, List
 
 logger = logging.getLogger("mask.telemetry")
 
-# ---------------------------------------------------------------------------
 # Event schema
-# ---------------------------------------------------------------------------
 
 def _make_event(
     action: str,
@@ -45,9 +43,7 @@ def _make_event(
     }
 
 
-# ---------------------------------------------------------------------------
 # AuditLogger – singleton, thread-safe
-# ---------------------------------------------------------------------------
 
 class AuditLogger:
     """Collects audit events and flushes them periodically."""

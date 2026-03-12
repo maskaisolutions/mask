@@ -17,9 +17,7 @@ logger = logging.getLogger("mask.integrations.adk")
 __all__ = ["decrypt_before_tool", "encrypt_after_tool"]
 
 
-# ---------------------------------------------------------------------------
 # ADK callbacks (signature matches google.adk hook protocol)
-# ---------------------------------------------------------------------------
 
 def decrypt_before_tool(
     tool: Any,

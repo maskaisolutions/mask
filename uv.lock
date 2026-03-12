@@ -2320,7 +2320,7 @@ wheels = [
 
 [[package]]
 name = "maskcloud"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -2356,14 +2356,23 @@ examples = [
 langchain = [
     { name = "langchain-core" },
 ]
+lg = [
+    { name = "spacy" },
+]
 llamaindex = [
     { name = "llama-index-core" },
+]
+md = [
+    { name = "spacy" },
 ]
 memcached = [
     { name = "pymemcache" },
 ]
 redis = [
     { name = "redis" },
+]
+sm = [
+    { name = "spacy" },
 ]
 spacy = [
     { name = "spacy" },
@@ -2405,10 +2414,13 @@ requires-dist = [
     { name = "redis", marker = "extra == 'examples'", specifier = ">=5.0.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0" },
     { name = "spacy", marker = "extra == 'all'", specifier = ">=3.4.4" },
+    { name = "spacy", marker = "extra == 'lg'", specifier = ">=3.4.4" },
+    { name = "spacy", marker = "extra == 'md'", specifier = ">=3.4.4" },
+    { name = "spacy", marker = "extra == 'sm'", specifier = ">=3.4.4" },
     { name = "spacy", marker = "extra == 'spacy'", specifier = ">=3.4.4" },
     { name = "uvicorn", marker = "extra == 'examples'", specifier = ">=0.30" },
 ]
-provides-extras = ["redis", "dynamodb", "memcached", "adk", "langchain", "llamaindex", "spacy", "all", "examples"]
+provides-extras = ["redis", "dynamodb", "memcached", "adk", "langchain", "llamaindex", "spacy", "sm", "md", "lg", "all", "examples"]
 
 [package.metadata.requires-dev]
 dev = [

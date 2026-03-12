@@ -7,6 +7,7 @@ os.environ["MASK_VAULT_TYPE"] = "memory"
 import pytest
 
 from mask.core.vault import encode, reset_vault
+from mask.core.fpe import reset_master_key
 from mask.integrations.adk_hooks import (
     decrypt_before_tool,
     encrypt_after_tool,
@@ -27,8 +28,11 @@ class _FakeCtx:
 @pytest.fixture(autouse=True)
 def _fresh():
     reset_vault()
+    reset_master_key()
+    os.environ["MASK_MASTER_KEY"] = "test-hooks-key"
     yield
     reset_vault()
+    reset_master_key()
 
 
 class TestDeepDecode:
@@ -83,7 +87,6 @@ class TestEncryptAfterTool:
         assert looks_like_token(args["email"])
 
     def test_encodes_leaked_emails_in_string_response(self):
-        # Tools returning simple strings should be tokenized
         args = "Contact us at support@example.com for help."
         result = _deep_encode_pii(args)
         assert isinstance(result, str)
@@ -91,7 +94,6 @@ class TestEncryptAfterTool:
         assert "support@example.com" not in result
 
     def test_encodes_leaked_emails_in_list_response(self):
-        # Tools returning a list of items should be tokenized
         args = ["user1@domain.com", "user2@domain.com", 42]
         result = _deep_encode_pii(args)
         assert isinstance(result, list)

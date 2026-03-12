@@ -7,9 +7,7 @@ import pytest
 
 from mask.core.vault import DynamoDBVault, MemcachedVault
 
-# ---------------------------------------------------------------------------
 # DynamoDB Tests
-# ---------------------------------------------------------------------------
 
 @mock.patch.dict(os.environ, {"MASK_DYNAMODB_TABLE": "test-table", "MASK_DYNAMODB_REGION": "eu-west-1"})
 @mock.patch("boto3.resource")
@@ -91,9 +89,7 @@ class TestDynamoDBVault:
         mock_table.delete_item.assert_any_call(Key={"token": "mask:tok_3"})
 
 
-# ---------------------------------------------------------------------------
 # Memcached Tests
-# ---------------------------------------------------------------------------
 
 @mock.patch.dict(os.environ, {"MASK_MEMCACHED_HOST": "test-box", "MASK_MEMCACHED_PORT": "2222"})
 class TestMemcachedVault:

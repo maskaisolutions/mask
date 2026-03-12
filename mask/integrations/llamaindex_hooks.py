@@ -20,9 +20,7 @@ from mask.core.utils import deep_decode, deep_encode_pii
 
 logger = logging.getLogger("mask.integrations.llamaindex")
 
-# ---------------------------------------------------------------------------
 # Tool Wrapper — works with any callable
-# ---------------------------------------------------------------------------
 
 class MaskToolWrapper:
     """Wrap any callable tool to auto-decode inputs and encode outputs.
@@ -60,9 +58,7 @@ class MaskToolWrapper:
         return result
 
 
-# ---------------------------------------------------------------------------
 # Callback handler (for LlamaIndex's callback system)
-# ---------------------------------------------------------------------------
 
 try:
     from llama_index.core.callbacks.base_handler import BaseCallbackHandler  # type: ignore
@@ -126,3 +122,38 @@ except ImportError:
                 "llama-index-core is required for LlamaIndex integration. "
                 "Install with: pip install llama-index-core"
             )
+
+import contextlib
+from unittest.mock import patch
+
+@contextlib.contextmanager
+def mask_llamaindex_hooks():
+    """Context manager for 'magic' LlamaIndex PII protection.
+
+    While active, this hook intercepts all tool calls within LlamaIndex's
+    BaseTool class (including FunctionTool) to automatically detokenize
+    inputs and re-tokenize outputs.
+    """
+    try:
+        from llama_index.core.tools import BaseTool
+    except ImportError:
+        logger.warning("llama-index-core not installed; mask_llamaindex_hooks will have no effect.")
+        yield
+        return
+
+    original_call = BaseTool.__call__
+    
+    def wrapped_call(self, *args, **kwargs):
+        # 1. Detokenize inputs
+        decoded_args = tuple(deep_decode(a) for a in args)
+        decoded_kwargs = deep_decode(kwargs)
+        # 2. Execute tool
+        result = original_call(self, *decoded_args, **decoded_kwargs)
+        # 3. Tokenize output
+        if isinstance(result, (str, dict, list)):
+            return deep_encode_pii(result)
+        return result
+
+    with patch.object(BaseTool, "__call__", wrapped_call):
+        logger.info("[llamaindex-magic] active: wrapping BaseTool.__call__")
+        yield
