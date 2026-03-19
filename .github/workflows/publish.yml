@@ -1,0 +1,50 @@
+name: Publish SDKs
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish-python:
+    name: Build and Publish Python SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./mask-python
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Build and Publish to PyPI
+        run: |
+          uv build
+          uv publish
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+  publish-typescript:
+    name: Build and Publish TypeScript SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./mask-ts
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
