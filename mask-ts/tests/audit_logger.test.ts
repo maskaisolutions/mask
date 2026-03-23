@@ -1,23 +1,18 @@
 import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { AuditLogger } from '../src/telemetry/audit_logger';
-import * as fs from 'fs';
 
 describe('TestAuditLogger', () => {
   let logger: AuditLogger;
-  const dbPath = ":memory:";
 
   beforeEach(() => {
-    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-    process.env.MASK_AUDIT_DB = dbPath;
     // @ts-ignore - reaching into private for test isolation
     AuditLogger._instance = null;
     logger = AuditLogger.getInstance();
+    logger.start();
   });
 
-  afterEach(() => {
-    logger.stop();
-    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-    delete process.env.MASK_AUDIT_DB;
+  afterEach(async () => {
+    await logger.stop();
   });
 
   test('test_log_buffers_events', () => {
@@ -38,15 +33,16 @@ describe('TestAuditLogger', () => {
     expect(evt2.agent).toBe("test_bot");
   });
 
-  test('test_flush_only_logs_locally', () => {
+  test('test_flush_only_logs_locally', async () => {
     const spy = jest.spyOn(console, 'info').mockImplementation(() => {});
     logger.log("encode", "t1");
     
     // @ts-ignore
-    logger._flush();
+    await logger._flush();
     
     expect(spy).toHaveBeenCalled();
-    const callArgs = spy.mock.calls[0][0];
+    const callArgs = spy.mock.calls.find(c => c[0].includes("t1"))?.[0];
+    expect(callArgs).toBeDefined();
     expect(callArgs).toContain("t1");
     expect(callArgs).toContain("encode");
     

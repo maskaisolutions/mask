@@ -100,8 +100,12 @@ class MaskClient:
             plaintext = self.crypto.decrypt(ciphertext)
             self.logger.log("decode", token, "opaque")
             return plaintext
-        except Exception:
+        except Exception as e:
             self.logger.log("error", token, "opaque", error="decryption_failed")
+            import os
+            if os.environ.get("MASK_STRICT_PROD") == "true":
+                from mask_privacy.core.vault import DecodeError
+                raise DecodeError(f"Decryption failed for token {token}: {e}")
             return token
 
     def scan_and_tokenize(self, text: str) -> str:

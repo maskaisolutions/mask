@@ -12,11 +12,12 @@
 
 import * as process from 'process';
 import * as crypto from 'crypto';
-import { generateFPEToken, looksLikeToken, TOKEN_PATTERN } from './fpe';
-import { getCryptoEngine } from './crypto';
+import { generateFPEToken } from './fpe';
+import { looksLikeToken, TOKEN_PATTERN } from './fpe_utils';
+import { getCryptoEngineAsync } from './crypto';
 import { MaskVaultConnectionError } from './exceptions';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocument, TransactWriteCommand, GetCommand, DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { getAuditLogger } from '../telemetry/audit_logger';
+import { BucketManager } from './search';
 
 /**
  * Return the configured fail strategy: 'open' (default) or 'closed'.
@@ -28,34 +29,37 @@ import { DynamoDBDocument, TransactWriteCommand, GetCommand, DeleteCommand, PutC
 /** @internal - exported for tests */
 export function _getFailStrategy(): string {
   const strategy = (process.env.MASK_FAIL_STRATEGY || "open").toLowerCase();
-  // console.log(`[_getFailStrategy] returning: ${strategy}`);
   return strategy;
 }
 
 /** Interface every vault backend must implement. */
 export abstract class BaseVault {
   /** Persist a token → plaintext mapping with a TTL. Optionally save a reverse lookup hash. */
-  abstract store(token: string, plaintext: string, ttlSeconds: number, ptHash?: string | null): Promise<void> | void;
+  abstract store(token: string, plaintext: string, ttlSeconds: number, ptHash?: string | null): Promise<void>;
 
   /** Return the existing unexpired token for a given plaintext hash, or null. */
-  abstract getTokenByPlaintextHash(ptHash: string): Promise<string | null> | string | null;
+  abstract getTokenByPlaintextHash(ptHash: string): Promise<string | null>;
 
   /** Return the plaintext for token, or null if missing/expired. */
-  abstract retrieve(token: string): Promise<string | null> | string | null;
+  abstract retrieve(token: string): Promise<string | null>;
 
   /** Delete a token and its reverse mapping. */
-  abstract delete(token: string): Promise<void> | void;
+  abstract delete(token: string): Promise<void>;
 }
 
 /**
  * Helper to deterministically hash plaintext for reverse lookups in distributed vaults.
  *
- * Whitespace is stripped before hashing so that " Alice " and "Alice"
- * produce the same hash.
+ * If a secret is provided (from CryptoEngine.getIndexSecret), it uses HMAC-SHA256
+ * for a secure blind index. Otherwise, defaults to plain SHA-256 for backward compatibility.
  */
 /** @internal - exported for tests */
-export function _hashPlaintext(plaintext: string): string {
-  return crypto.createHash('sha256').update(plaintext.trim(), 'utf-8').digest('hex');
+export function _hashPlaintext(plaintext: string, secret?: Buffer): string {
+  const trimmed = plaintext.trim();
+  if (secret) {
+    return crypto.createHmac('sha256', secret).update(trimmed, 'utf-8').digest('hex');
+  }
+  return crypto.createHash('sha256').update(trimmed, 'utf-8').digest('hex');
 }
 
 /**
@@ -74,6 +78,11 @@ export class MemoryVault extends BaseVault {
   }
 
   private _cleanup(): void {
+    // Probabilistic cleanup: only run ~1% of the time to avoid O(N) blocking
+    if (Math.random() > 0.01) {
+      return;
+    }
+
     const now = Date.now() / 1000;
     for (const [token, entry] of this._store.entries()) {
       if (now > entry.expiry) {
@@ -85,7 +94,7 @@ export class MemoryVault extends BaseVault {
     }
   }
 
-  store(token: string, plaintext: string, ttlSeconds: number, ptHash: string | null = null): void {
+  async store(token: string, plaintext: string, ttlSeconds: number, ptHash: string | null = null): Promise<void> {
     this._cleanup();
     this._store.set(token, {
       plaintext,
@@ -97,7 +106,7 @@ export class MemoryVault extends BaseVault {
     }
   }
 
-  getTokenByPlaintextHash(ptHash: string): string | null {
+  async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
     this._cleanup();
     const token = this._reverseStore.get(ptHash);
     if (token && this._store.has(token)) {
@@ -106,7 +115,7 @@ export class MemoryVault extends BaseVault {
     return null;
   }
 
-  retrieve(token: string): string | null {
+  async retrieve(token: string): Promise<string | null> {
     this._cleanup();
     const entry = this._store.get(token);
     if (!entry) {
@@ -122,7 +131,7 @@ export class MemoryVault extends BaseVault {
     return entry.plaintext;
   }
 
-  delete(token: string): void {
+  async delete(token: string): Promise<void> {
     const entry = this._store.get(token);
     if (entry) {
       this._store.delete(token);
@@ -151,7 +160,7 @@ export class RedisVault extends BaseVault {
       this._client = new Redis(url, {
         ...options,
         // Ensure connectivity at init time
-        maxRetriesPerRequest: 1
+        maxRetriesPerRequest: 3
       });
       console.info(`RedisVault connected to ${url}`);
     } catch (e) {
@@ -229,6 +238,7 @@ export class DynamoDBVault extends BaseVault {
   }
 
   async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null): Promise<void> {
+    const { TransactWriteCommand, PutCommand } = require('@aws-sdk/lib-dynamodb');
     const now = Math.floor(Date.now() / 1000);
     const ttlVal = now + ttlSeconds;
     const item = {
@@ -246,10 +256,10 @@ export class DynamoDBVault extends BaseVault {
               Put: {
                 TableName: this._tableName,
                 Item: {
-                  token: { S: `mask:${token}` },
-                  ciphertext: { S: ciphertext },
-                  ttl: { N: ttlVal.toString() },
-                  ptr_hash: { S: ptHash }
+                  token: `mask:${token}`,
+                  ciphertext: ciphertext,
+                  ttl: ttlVal,
+                  ptr_hash: ptHash
                 }
               }
             },
@@ -257,9 +267,9 @@ export class DynamoDBVault extends BaseVault {
               Put: {
                 TableName: this._tableName,
                 Item: {
-                  token: { S: `mask-rev:${ptHash}` },
-                  ciphertext: { S: token },
-                  ttl: { N: ttlVal.toString() }
+                  token: `mask-rev:${ptHash}`,
+                  ciphertext: token,
+                  ttl: ttlVal
                 }
               }
             }
@@ -267,13 +277,9 @@ export class DynamoDBVault extends BaseVault {
         }));
       } catch (e: any) {
         console.error(`DynamoDB transact_write_items failed: ${e}`);
-        if (_getFailStrategy() === "closed") {
-          throw new MaskVaultConnectionError(`DynamoDB atomic write failed: ${e}`);
-        }
-        // fail-open fall back
-        // Fallback to separate Puts
-        await this.store(token, ciphertext, ttlSeconds, null);
-        await this.store(`mask-rev:${ptHash}`, token, ttlSeconds, null);
+        // In both strategies, we must raise for DynamoDB failures to prevent data loss
+        // since we didn't perform the atomic write.
+        throw new MaskVaultConnectionError(`DynamoDB atomic write failed: ${e}`);
       }
     } else {
       // Single store (no reverse index)
@@ -288,6 +294,7 @@ export class DynamoDBVault extends BaseVault {
   }
 
   async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
+    const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
     const now = Math.floor(Date.now() / 1000);
     const resp = await this._client.send(new GetCommand({
       TableName: this._tableName,
@@ -304,6 +311,7 @@ export class DynamoDBVault extends BaseVault {
   }
 
   async retrieve(token: string): Promise<string | null> {
+    const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
     const now = Math.floor(Date.now() / 1000);
     const resp = await this._client.send(new GetCommand({
       TableName: this._tableName,
@@ -323,17 +331,15 @@ export class DynamoDBVault extends BaseVault {
   }
 
   async delete(token: string): Promise<void> {
-    const { GetCommand } = require('@aws-sdk/lib-dynamodb');
+    const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
     const resp = await this._client.send(new GetCommand({
       TableName: this._tableName,
       Key: { token: `mask:${token}` }
     }));
     const item = resp.Item;
     if (item && item.ptr_hash) {
-      const { DeleteCommand } = require('@aws-sdk/lib-dynamodb');
       await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${item.ptr_hash}` } }));
     }
-    const { DeleteCommand } = require('@aws-sdk/lib-dynamodb');
     await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask:${token}` } }));
   }
 }
@@ -358,33 +364,49 @@ export class MemcachedVault extends BaseVault {
   }
 
   async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null): Promise<void> {
-    await this._client.set(`mask:${token}`, Buffer.from(ciphertext), { expires: ttlSeconds });
-    if (ptHash) {
-      await this._client.set(`mask-rev:${ptHash}`, Buffer.from(token), { expires: ttlSeconds });
-      await this._client.set(`mask-hash:${token}`, Buffer.from(ptHash), { expires: ttlSeconds });
+    try {
+        await this._client.set(`mask:${token}`, Buffer.from(ciphertext), { expires: ttlSeconds });
+        if (ptHash) {
+           await this._client.set(`mask-rev:${ptHash}`, Buffer.from(token), { expires: ttlSeconds });
+           await this._client.set(`mask-hash:${token}`, Buffer.from(ptHash), { expires: ttlSeconds });
+        }
+    } catch (e) {
+        if (_getFailStrategy() === "closed") {
+            throw new MaskVaultConnectionError(`Memcached error: ${e}`);
+        }
     }
   }
 
   async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
-    const { value } = await this._client.get(`mask-rev:${ptHash}`);
-    if (!value) return null;
-    const token = value.toString();
-    return (await this.retrieve(token)) !== null ? token : null;
+    try {
+        const { value } = await this._client.get(`mask-rev:${ptHash}`);
+        if (!value) return null;
+        const token = value.toString();
+        return (await this.retrieve(token)) !== null ? token : null;
+    } catch (e) {
+        return null;
+    }
   }
 
   async retrieve(token: string): Promise<string | null> {
-    const { value } = await this._client.get(`mask:${token}`);
-    return value ? value.toString() : null;
+    try {
+        const { value } = await this._client.get(`mask:${token}`);
+        return value ? value.toString() : null;
+    } catch (e) {
+        return null;
+    }
   }
 
   async delete(token: string): Promise<void> {
-    const { value } = await this._client.get(`mask-hash:${token}`);
-    const ptHash = value ? value.toString() : null;
-    await this._client.delete(`mask:${token}`);
-    await this._client.delete(`mask-hash:${token}`);
-    if (ptHash) {
-      await this._client.delete(`mask-rev:${ptHash}`);
-    }
+    try {
+        const { value } = await this._client.get(`mask-hash:${token}`);
+        const ptHash = value ? value.toString() : null;
+        await this._client.delete(`mask:${token}`);
+        await this._client.delete(`mask-hash:${token}`);
+        if (ptHash) {
+          await this._client.delete(`mask-rev:${ptHash}`);
+        }
+    } catch (e) {}
   }
 }
 
@@ -423,54 +445,70 @@ export function resetVault(): void {
 
 // Public convenience API (encode / decode)
 
+export type EncodeOptions = {
+    ttl?: number;
+    searchBuckets?: ('year' | 'month' | 'day' | 'numeric')[];
+    searchBucketSize?: number;
+};
+
 /**
  * Tokenise rawText, encrypt it, store in vault, return the FPE token.
  */
-export async function encode(rawText: string, options: { ttl?: number } = {}): Promise<string> {
+export async function encode(rawText: string, options: EncodeOptions = {}): Promise<string> {
   if (looksLikeToken(rawText)) {
     return rawText;
   }
 
   const text = rawText.trim();
   const vault = getVault();
-  const ptHash = _hashPlaintext(text);
+  const cryptoEngine = await getCryptoEngineAsync();
+  const indexSecret = await cryptoEngine.getIndexSecret();
+  
+  const ptHash = _hashPlaintext(text, indexSecret);
 
   // 1. Deduplication check
   const existingToken = await vault.getTokenByPlaintextHash(ptHash);
   if (existingToken) {
     if (await vault.retrieve(existingToken) !== null) {
+      getAuditLogger().log("dedup", existingToken);
       return existingToken;
     }
   }
 
   // 2. Generate new token
-  const token = generateFPEToken(text);
+  const token = await generateFPEToken(text);
 
   // 3. Encrypt the plaintext before it touches the vault
-  const crypto = getCryptoEngine();
-  const ciphertext = crypto.encrypt(text);
+  const ciphertext = cryptoEngine.encrypt(text);
 
-  // 4. Store with reverse lookup hash
-  await vault.store(token, ciphertext, options.ttl || DEFAULT_TTL, ptHash);
+  // 4. Store with primary reverse lookup hash
+  const ttl = options.ttl || DEFAULT_TTL;
+  await vault.store(token, ciphertext, ttl, ptHash);
 
+  // 5. Store additional blind indices if buckets are requested
+  if (options.searchBuckets && options.searchBuckets.length > 0) {
+      for (const bType of options.searchBuckets) {
+          let bucketVal: string;
+          if (bType === 'numeric') {
+              bucketVal = BucketManager.numericBucket(text, options.searchBucketSize || 10);
+          } else {
+              bucketVal = BucketManager.dateBucket(text, bType);
+          }
+          const bHash = await BucketManager.getBucketIndex(bucketVal);
+          await vault.store(token, ciphertext, ttl, bHash);
+
+      }
+  }
+
+  getAuditLogger().log("encode", token);
   return token;
 }
 
-/** Legacy / Sync-friendly wrapper for MemoryVault only. */
+/** Legacy / Sync-friendly wrapper for MemoryVault only.
+ * @deprecated Use encode() which is async.
+ */
 export function encodeSync(rawText: string, options: { ttl?: number } = {}): string {
-    const vault = getVault();
-    if (!(vault instanceof MemoryVault)) {
-        throw new Error("encodeSync is only supported for MemoryVault. Use encode() for async vaults.");
-    }
-    if (looksLikeToken(rawText)) return rawText;
-    const text = rawText.trim();
-    const ptHash = _hashPlaintext(text);
-    const existingToken = vault.getTokenByPlaintextHash(ptHash);
-    if (existingToken && vault.retrieve(existingToken) !== null) return existingToken;
-    const token = generateFPEToken(text);
-    const ciphertext = getCryptoEngine().encrypt(text);
-    vault.store(token, ciphertext, options.ttl || DEFAULT_TTL, ptHash);
-    return token;
+    throw new Error("encodeSync is deprecated and unsupported in the new async architecture. Use encode().");
 }
 
 /** Async wrapper for encode (parity with Python aencode). */
@@ -493,8 +531,10 @@ export async function decode(token: string): Promise<string> {
   }
 
   try {
-    const crypto = getCryptoEngine();
-    return crypto.decrypt(ciphertext);
+    const crypto = await getCryptoEngineAsync();
+    const result = crypto.decrypt(ciphertext);
+    getAuditLogger().log("decode", token);
+    return result;
   } catch (e) {
     throw new DecodeError("Failed to decrypt token payload");
   }
@@ -522,15 +562,17 @@ export async function detokenizeText(text: string): Promise<string> {
     return text;
   }
 
-  // In TS, we need to handle the regex replacement asynchronously if decode is async.
-  // We'll find all matches, then resolve them.
   const tokens = text.match(TOKEN_PATTERN) || [];
   let result = text;
   
-  // To preserve 1:1 functional logic but handle JS async:
   for (const token of tokens) {
       const plaintext = await _decodeLenient(token);
-      result = result.replace(token, plaintext);
+      if (plaintext !== token) {
+        // Use global regex to replace all occurrences of this token
+        // Escape the token to safely use in a regex
+        const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        result = result.replace(new RegExp(escapedToken, 'g'), plaintext);
+      }
   }
   
   return result;

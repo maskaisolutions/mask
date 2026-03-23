@@ -36,6 +36,8 @@ from mask_privacy.core.fpe import generate_fpe_token, looks_like_token
 
 logger = logging.getLogger("mask.scanner")
 
+# Persistent thread pool for NLP analysis to avoid per-call thread churn
+_SCANNER_POOL = ThreadPoolExecutor(max_workers=int(os.environ.get("MASK_NLP_MAX_WORKERS", "4")))
 
 # Regex patterns for Tier 1 deterministic detection
 
@@ -212,17 +214,16 @@ class PresidioScanner:
         entities: List[Dict] = []
 
         # Run the heavy NLP analysis with a timeout guard
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                self._analyzer.analyze,
-                text=text, entities=self._supported_entities, language="en",
+        future = _SCANNER_POOL.submit(
+            self._analyzer.analyze,
+            text=text, entities=self._supported_entities, language="en",
+        )
+        try:
+            results = future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            raise MaskNLPTimeout(
+                f"Presidio analysis exceeded {timeout}s timeout"
             )
-            try:
-                results = future.result(timeout=timeout)
-            except FuturesTimeoutError:
-                raise MaskNLPTimeout(
-                    f"Presidio analysis exceeded {timeout}s timeout"
-                )
 
         masked_text = text
         # Sort by start descending for safe replacement

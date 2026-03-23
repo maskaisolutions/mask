@@ -49,7 +49,7 @@ The Data Plane is the open-source, transparent, auditable runtime execution laye
 *   **JIT Cryptography Engine:** The core pre-tool decryption and post-tool encryption hooks that intercept and mutate data in-flight.
 *   **Format-Preserving Tokenization Router:** Ensures downstream databases and strict schemas don't break when handed a token. Tokens look like real data; the real values are stored encrypted and retrieved via the vault.
 *   **Pluggable Distributed Vaults:** Support for enterprise-native caching layers (Redis, DynamoDB, Memcached) to ensure horizontally-scaled edge agents have synchronized access to detokenization mapping.
-*   **Local Audit Logger:** An asynchronous AuditLogger that buffers privacy events to a local SQLite database and emits structured JSON logs for SIEM ingestion.
+*   **Local Audit Logger:** An asynchronous AuditLogger that buffers privacy events in memory and emits structured JSON logs to stdout for SIEM ingestion.
 
 ---
 
@@ -89,11 +89,40 @@ By generating statistically impossible tokens, Mask guarantees it will never acc
 ### 4. Enterprise Async Support
 Mask is built from the ground up for high-concurrency Node.js environments. All core operations are asynchronous and promised-based. Calling `encode()`, `decode()`, or `scanAndTokenize()` allows your event loop to remain unblocked while handling PII tokenization tasks.
 
-### 5. Pluggable Key Providers (AWS KMS / HashiCorp Vault)
-For zero-trust environments, `MASK_ENCRYPTION_KEY` no longer needs to live in a static environment variable. Developers can fetch secrets dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault at runtime and inject them into the `CryptoEngine`.
+### 5. Pluggable Key Management (Enterprise KMS)
+For zero-trust environments, `MASK_ENCRYPTION_KEY` no longer needs to live in a static environment variable. Mask supports a pluggable `BaseKeyProvider` architecture that allows you to fetch secrets dynamically from dedicated Key Management Services.
 
-### 6. Remote NLP Scanning
-Performance-sensitive deployments can now offload the NLP models (like spaCy or Presidio) to a centralized service using the `RemotePresidioScanner`. This permits "lightweight" edge workers (e.g., AWS Lambda) to run Mask with near-zero memory footprint.
+#### Supported Providers
+*   **EnvKeyProvider (Default)**: Reads from `MASK_ENCRYPTION_KEY` and `MASK_MASTER_KEY`.
+*   **AwsKmsKeyProvider (Stub)**: Placeholder for AWS KMS. Requires implementation of `@aws-sdk/client-kms`.
+*   **AzureKeyVaultProvider (Stub)**: Placeholder for Azure Key Vault. Requires implementation of `@azure/keyvault-keys`.
+*   **HashiCorpVaultProvider (Stub)**: Placeholder for HashiCorp Vault.
+
+> [!IMPORTANT]
+> **Production Security (Fail-Shut)**:
+> All KMS stub providers are designed to **Fail-Shut**. If you attempt to use a stub provider that is not yet fully implemented, the SDK will throw an `Error` instead of falling back to insecure defaults. This guarantees that you never accidentally encrypt data with a weak or auto-generated key when you intended to use a KMS.
+
+#### Example: Implementing a Custom Provider
+If you need to support a specific KMS today, you can easily implement the `BaseKeyProvider` interface:
+
+```typescript
+import { BaseKeyProvider, setKeyProvider } from 'mask-privacy/core/key_provider';
+
+class MyCustomKmsProvider extends BaseKeyProvider {
+  async getEncryptionKey(): Promise<string> {
+    // Logic to fetch from your KMS
+    return "your-secret-key";
+  }
+  async getMasterKey(): Promise<string> {
+    return "your-master-key";
+  }
+}
+
+setKeyProvider(new MyCustomKmsProvider());
+```
+
+### 6. Local NLP Scanning (Default)
+Performance-sensitive deployments now utilize the built-in `LocalTransformersScanner` by default. This uses HuggingFace Transformers to run PII detection locally within your Node.js process, eliminating the need for external NLP services.
 
 ### 7. Sub-string Detokenization
 Mask includes the ability to detokenize PII embedded within larger text blocks (like email bodies or chat messages). `detokenizeText()` uses high-performance regex to find and restore all tokens within a paragraph before they hit your tools.
@@ -110,6 +139,7 @@ Add peer dependencies depending on your infrastructure:
 npm install ioredis          # For Redis vaults
 npm install @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb # For DynamoDB vaults
 npm install memjs            # For Memcached vaults
+npm install @huggingface/transformers # Required for local NLP scanning
 ```
 
 ### Framework Support
@@ -150,6 +180,10 @@ export MASK_DYNAMODB_REGION=us-east-1
 # For Memcached:
 export MASK_MEMCACHED_HOST=localhost
 export MASK_MEMCACHED_PORT=11211
+
+#### 4. Security Enforcement
+# Enable strict mode to refuse startup without MASK_ENCRYPTION_KEY
+export MASK_STRICT_PROD=true
 ```
 
 ---
@@ -236,11 +270,14 @@ The SDK includes a thread-safe, asynchronous AuditLogger built-in.
 
 As your agents encrypt and decrypt data, the logger buffers these privacy events (Action, Agent, TTL). **Raw PII is never logged.** 
 
-Audit events are stored locally in a SQLite database (`.mask_audit.db`) and flushed to stdout as structured JSON. Pipe them into your existing Datadog or Splunk agents for SOC2/HIPAA compliance reporting.
+Audit events are buffered in memory and flushed periodically to stdout as structured JSON. Pipe these logs into your existing Datadog or Splunk agents for SOC2/HIPAA compliance reporting.
 
-To disable the local SQLite buffer:
+The `AuditLogger` includes graceful shutdown hooks (`SIGTERM`, `SIGINT`) to ensure all buffered events are flushed before the process exits.
+
+To prevent memory issues in high-volume environments, the buffer size can be capped:
+
 ```bash
-export MASK_DISABLE_AUDIT_DB=true
+export MASK_AUDIT_MAX_BUFFER_SIZE=5000
 ```
 
 ## License

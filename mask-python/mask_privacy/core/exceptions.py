@@ -21,3 +21,7 @@ class MaskDecryptionError(MaskError):
 class MaskNLPTimeout(MaskError):
     """Raised when spaCy / Presidio analysis exceeds the time budget."""
 
+
+class MaskSecurityError(MaskError):
+    """Raised when mandatory security keys (MASK_MASTER_KEY, etc.) are missing."""
+

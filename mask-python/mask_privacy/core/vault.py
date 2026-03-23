@@ -1,516 +1,456 @@
 """
 Vault abstraction layer for Mask Privacy SDK.
-
-Provides pluggable backends for token-to-plaintext storage:
-  - MemoryVault: In-process dict (dev/testing, single-process only)
-  - RedisVault: Redis-backed (production, multi-pod K8s)
-  - DynamoDBVault: AWS DynamoDB-backed (AWS-native enterprises)
-  - MemcachedVault: Memcached-backed (lightweight distributed cache)
-
-The active vault is selected via the MASK_VAULT_TYPE env var.
 """
 
 import os
 import time
-import logging
+import hmac
 import hashlib
+import logging
 import threading
-from abc import ABC, abstractmethod
-from typing import Any, Optional, Tuple
+from typing import Dict, Any, Optional, List, Union, Literal
 
-from mask_privacy.core.fpe import generate_fpe_token, looks_like_token
+from mask_privacy.core.fpe import looks_like_token, generate_fpe_token
 from mask_privacy.core.crypto import get_crypto_engine
+from mask_privacy.core.exceptions import MaskVaultConnectionError, MaskDecryptionError
+from mask_privacy.telemetry.audit_logger import get_audit_logger
+from mask_privacy.core.search import BucketManager
+
+class DecodeError(Exception):
+    """Raised when a token cannot be decoded/decrypted."""
+    pass
 
 logger = logging.getLogger("mask.vault")
 
-
 def _get_fail_strategy() -> str:
-    """Return the configured fail strategy: 'open' (default) or 'closed'.
-
-    - ``open``:   vault errors return None / original text (graceful).
-    - ``closed``: vault errors raise MaskVaultConnectionError (strict).
-    """
     return os.environ.get("MASK_FAIL_STRATEGY", "open").lower()
 
-# Abstract base
+def _hash_plaintext(plaintext: str, secret: Optional[bytes] = None) -> str:
+    """Deterministically hash plaintext for reverse lookups."""
+    trimmed = plaintext.strip()
+    if secret:
+        return hmac.new(secret, trimmed.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hashlib.sha256(trimmed.encode("utf-8")).hexdigest()
 
-class BaseVault(ABC):
-    """Interface every vault backend must implement."""
 
-    @abstractmethod
-    def store(self, token: str, plaintext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
-        """Persist a token → plaintext mapping with a TTL. Optionally save a reverse lookup hash."""
+class BaseVault:
+    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+        raise NotImplementedError
 
-    @abstractmethod
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
-        """Return the existing unexpired token for a given plaintext hash, or None."""
+        raise NotImplementedError
 
-    @abstractmethod
     def retrieve(self, token: str) -> Optional[str]:
-        """Return the plaintext for *token*, or None if missing/expired."""
+        raise NotImplementedError
 
-def _hash_plaintext(plaintext: str) -> str:
-    """Helper to deterministically hash plaintext for reverse lookups in distributed vaults.
+    def delete(self, token: str) -> None:
+        raise NotImplementedError
 
-    Whitespace is stripped before hashing so that ``" Alice "`` and ``"Alice"``
-    produce the same hash — matching the normalisation done by ``generate_fpe_token``.
-    """
-    return hashlib.sha256(plaintext.strip().encode("utf-8")).hexdigest()
-
-
-# In-memory implementation (single-process, dev / testing)
 
 class MemoryVault(BaseVault):
-    """Dict-backed vault.  Fast, but state is lost across processes. Thread-safe."""
+    """In-memory implementation (dev / testing)."""
 
-    def __init__(self) -> None:
-        # _store maps token -> (ciphertext, expiry, pt_hash_or_none)
-        self._store: dict[str, Tuple[str, float, Optional[str]]] = {}
-        self._reverse_store: dict[str, str] = {}
-        self._lock = threading.Lock()
+    def __init__(self):
+        # Maps token -> {"ciphertext": val, "expiry": ts, "pt_hashes": set(hashes)}
+        self._store: Dict[str, Dict[str, Any]] = {}
+        # Maps hash -> token
+        self._reverse_store: Dict[str, str] = {}
+        self._lock = threading.RLock()
 
     def _cleanup(self) -> None:
-        # Caller must hold _lock
-        now = time.time()
-        expired = [k for k, (_, exp, _h) in self._store.items() if now > exp]
-        for k in expired:
-            _, _, pt_hash = self._store[k]
-            del self._store[k]
-            if pt_hash and self._reverse_store.get(pt_hash) == k:
-                del self._reverse_store[pt_hash]
-
-    def store(self, token: str, plaintext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
-        with self._lock:
-            self._cleanup()
-            self._store[token] = (plaintext, time.time() + ttl_seconds, pt_hash)
-            if pt_hash:
-                self._reverse_store[pt_hash] = token
+        import random
+        # Probabilistic cleanup: only scan O(N) entries ~1% of the time to avoid blocking
+        if random.random() > 0.01:
+            return
             
-    def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
+        now = time.time()
         with self._lock:
-            self._cleanup()
-            token = self._reverse_store.get(pt_hash)
-            if token and token in self._store:
-                return token
-        return None
+            # Create a list to avoid "dictionary changed size during iteration"
+            to_delete = [t for t, e in self._store.items() if now > e["expiry"]]
+            for token in to_delete:
+                entry = self._store.pop(token, None)
+                if entry:
+                    hashes = entry.get("pt_hashes", [])
+                    for h in hashes:
+                        if self._reverse_store.get(h) == token:
+                            self._reverse_store.pop(h, None)
+
+    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+        self._cleanup()
+        with self._lock:
+            if token not in self._store:
+                self._store[token] = {
+                    "ciphertext": ciphertext,
+                    "expiry": time.time() + ttl_seconds,
+                    "pt_hashes": set()
+                }
+            
+            entry = self._store[token]
+            entry["ciphertext"] = ciphertext  # update if already exists
+            entry["expiry"] = time.time() + ttl_seconds
+            
+            if pt_hash:
+                entry["pt_hashes"].add(pt_hash)
+                self._reverse_store[pt_hash] = token
+
+    def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
+        self._cleanup()
+        with self._lock:
+            return self._reverse_store.get(pt_hash)
 
     def retrieve(self, token: str) -> Optional[str]:
+        self._cleanup()
         with self._lock:
-            self._cleanup()
             entry = self._store.get(token)
-            if entry is None:
+            if not entry:
                 return None
-            plaintext, exp, pt_hash = entry
-            if time.time() > exp:
-                del self._store[token]
-                if pt_hash and self._reverse_store.get(pt_hash) == token:
-                    del self._reverse_store[pt_hash]
+            if time.time() > entry["expiry"]:
+                self.delete(token)
                 return None
-            return plaintext
+            return entry["ciphertext"]
 
     def delete(self, token: str) -> None:
         with self._lock:
             entry = self._store.pop(token, None)
             if entry:
-                _, _, pt_hash = entry
-                if pt_hash and self._reverse_store.get(pt_hash) == token:
-                    del self._reverse_store[pt_hash]
+                hashes = entry.get("pt_hashes", [])
+                for h in hashes:
+                    if self._reverse_store.get(h) == token:
+                        self._reverse_store.pop(h, None)
 
-
-# Distributed Scaling implementation (multi-pod, for future enterprise/hosted use)
-# NOTE: Currently, the SDK is "Local First". Use MemoryVault unless you are 
-# scaling across multiple servers and need shared token state.
 
 class RedisVault(BaseVault):
-    """Redis-backed vault for horizontally scaled deployments.
+    """Redis-backed vault for horizontally scaled deployments."""
 
-    Requires the `redis` package and a reachable Redis instance.
-    Configure via:
-        MASK_REDIS_URL  (default: redis://localhost:6379/0)
-    """
-
-    def __init__(self, **redis_kwargs: Any) -> None:
+    def __init__(self, **options: Any):
         try:
-            import redis  # type: ignore
-        except ImportError:
-            raise ImportError(
-                "The 'redis' package is required for RedisVault. "
-                "Install it with: pip install redis"
-            )
-        url = os.environ.get("MASK_REDIS_URL", "redis://localhost:6379/0")
-        
-        # Merge url configuration with explicitly passed kwargs (like mTLS ssl_certfile)
-        kwargs = dict(decode_responses=True)
-        kwargs.update(redis_kwargs)
-        
-        try:
-            self._client = redis.Redis.from_url(url, **kwargs)
-            # Verify connectivity at init time so bad config fails fast
+            import redis
+            url = os.environ.get("MASK_REDIS_URL", "redis://localhost:6379/0")
+            self._client = redis.from_url(url, decode_responses=True, **options)
             self._client.ping()
             logger.info("RedisVault connected to %s", url)
         except Exception as e:
-            from mask_privacy.core.exceptions import MaskVaultConnectionError
-            raise MaskVaultConnectionError(
-                f"Failed to connect to Redis at {url}: {e}"
-            ) from e
+            raise MaskVaultConnectionError(f"Failed to connect to Redis: {e}")
 
-    def store(self, token: str, plaintext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
-        pipe = self._client.pipeline()
-        pipe.setex(f"mask:{token}", ttl_seconds, plaintext)
-        if pt_hash:
-            pipe.setex(f"mask-rev:{pt_hash}", ttl_seconds, token)
-            # Store the hash so delete() can clean up the reverse mapping
-            pipe.setex(f"mask-hash:{token}", ttl_seconds, pt_hash)
-        pipe.execute()
+    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+        try:
+            pipe = self._client.pipeline()
+            pipe.setex(f"mask:{token}", ttl_seconds, ciphertext)
+            if pt_hash:
+                pipe.setex(f"mask-rev:{pt_hash}", ttl_seconds, token)
+                pipe.setex(f"mask-hash:{token}", ttl_seconds, pt_hash)
+            pipe.execute()
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"Redis write failed: {e}")
 
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
-        token = self._client.get(f"mask-rev:{pt_hash}")
-        if token:
-            # Verify the token hasn't expired independently
-            if self._client.exists(f"mask:{token}"):
-                return token
-            else:
-                self._client.delete(f"mask-rev:{pt_hash}")
-        return None
+        try:
+            token = self._client.get(f"mask-rev:{pt_hash}")
+            if not token:
+                return None
+            # Check if token still exists in primary store
+            actual = self.retrieve(token)
+            return token if actual else None
+        except:
+            return None
 
     def retrieve(self, token: str) -> Optional[str]:
-        return self._client.get(f"mask:{token}")
+        try:
+            return self._client.get(f"mask:{token}")
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"Redis read failed: {e}")
+            return None
 
     def delete(self, token: str) -> None:
-        pt_hash = self._client.get(f"mask-hash:{token}")
-        pipe = self._client.pipeline()
-        pipe.delete(f"mask:{token}")
-        pipe.delete(f"mask-hash:{token}")
-        if pt_hash:
-            pipe.delete(f"mask-rev:{pt_hash}")
-        pipe.execute()
+        try:
+            pt_hash = self._client.get(f"mask-hash:{token}")
+            pipe = self._client.pipeline()
+            pipe.delete(f"mask:{token}")
+            pipe.delete(f"mask-hash:{token}")
+            if pt_hash:
+                pipe.delete(f"mask-rev:{pt_hash}")
+            pipe.execute()
+        except:
+            pass
 
-
-# AWS Cloud Scaling implementation (for high-availability enterprise stacks)
-# NOTE: Intended for users already running large AWS footprints who want 
-# permanent, cloud-native storage for tokens.
 
 class DynamoDBVault(BaseVault):
-    """AWS DynamoDB-backed vault for AWS-native enterprise deployments.
+    """AWS DynamoDB-backed vault."""
 
-    Requires the `boto3` package and valid AWS credentials.
-    Configure via:
-        MASK_DYNAMODB_TABLE  (default: mask-vault)
-        MASK_DYNAMODB_REGION (default: us-east-1)
-    """
-
-    def __init__(self) -> None:
+    def __init__(self):
         try:
-            import boto3  # type: ignore
-        except ImportError:
-            raise ImportError(
-                "The 'boto3' package is required for DynamoDBVault. "
-                "Install it with: pip install boto3"
-            )
-        region = os.environ.get("MASK_DYNAMODB_REGION", "us-east-1")
-        self._table_name = os.environ.get("MASK_DYNAMODB_TABLE", "mask-vault")
-        self._client = boto3.resource("dynamodb", region_name=region)
-        self._table = self._client.Table(self._table_name)
-        logger.info("DynamoDBVault connected to table %s in %s", self._table_name, region)
+            import boto3
+            self._region = os.environ.get("MASK_DYNAMODB_REGION", "us-east-1")
+            self._table_name = os.environ.get("MASK_DYNAMODB_TABLE", "mask-vault")
+            self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
+            self._table = self._dynamodb.Table(self._table_name)
+            self._client = self._dynamodb.meta.client
+            logger.info("DynamoDBVault connected to table %s in %s", self._table_name, self._region)
+        except Exception as e:
+            raise MaskVaultConnectionError(f"Failed to connect to DynamoDB: {e}")
 
-    def store(self, token: str, plaintext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
-        import time as _time
-        import boto3  # type: ignore
-        ttl_val = int(_time.time()) + ttl_seconds
-        item = {
-            "token": f"mask:{token}",
-            "plaintext": plaintext,
-            "ttl": ttl_val,
-        }
+    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+        now = int(time.time())
+        ttl_val = now + ttl_seconds
+        
         if pt_hash:
-            item["ptr_hash"] = pt_hash
-            # Atomic write: store forward + reverse mapping in a single transaction
             try:
-                client = boto3.client("dynamodb", region_name=os.environ.get("MASK_DYNAMODB_REGION", "us-east-1"))
-                client.transact_write_items(
+                self._client.transact_write_items(
                     TransactItems=[
-                        {"Put": {"TableName": self._table_name, "Item": {
-                            "token": {"S": f"mask:{token}"},
-                            "plaintext": {"S": plaintext},
-                            "ttl": {"N": str(ttl_val)},
-                            "ptr_hash": {"S": pt_hash},
-                        }}},
-                        {"Put": {"TableName": self._table_name, "Item": {
-                            "token": {"S": f"mask-rev:{pt_hash}"},
-                            "plaintext": {"S": token},
-                            "ttl": {"N": str(ttl_val)},
-                        }}},
+                        {
+                            "Put": {
+                                "TableName": self._table_name,
+                                "Item": {
+                                    "token": {"S": f"mask:{token}"},
+                                    "ciphertext": {"S": ciphertext},
+                                    "ttl": {"N": str(ttl_val)},
+                                    "ptr_hash": {"S": pt_hash}
+                                }
+                            }
+                        },
+                        {
+                            "Put": {
+                                "TableName": self._table_name,
+                                "Item": {
+                                    "token": {"S": f"mask-rev:{pt_hash}"},
+                                    "ciphertext": {"S": token},
+                                    "ttl": {"N": str(ttl_val)}
+                                }
+                            }
+                        }
                     ]
                 )
             except Exception as e:
-                from mask_privacy.core.exceptions import MaskVaultConnectionError
                 logger.error("DynamoDB transact_write_items failed: %s", e)
-                if _get_fail_strategy() == "closed":
-                    raise MaskVaultConnectionError(
-                        f"DynamoDB atomic write failed: {e}"
-                    ) from e
-                # fail-open: fall back to non-atomic writes
-                self._table.put_item(Item=item)
-                self._table.put_item(Item={
-                    "token": f"mask-rev:{pt_hash}",
-                    "plaintext": token,
-                    "ttl": ttl_val,
-                })
+                raise MaskVaultConnectionError(f"DynamoDB atomic write failed: {e}")
         else:
-            self._table.put_item(Item=item)
-        
+            try:
+                self._table.put_item(
+                    Item={
+                        "token": f"mask:{token}",
+                        "ciphertext": ciphertext,
+                        "ttl": ttl_val
+                    }
+                )
+            except Exception as e:
+                if _get_fail_strategy() == "closed":
+                    raise MaskVaultConnectionError(f"DynamoDB write failed: {e}")
+
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
-        import time as _time
-        resp = self._table.get_item(Key={"token": f"mask-rev:{pt_hash}"})
-        item = resp.get("Item")
-        if not item:
-            return None
-        if int(_time.time()) > int(item.get("ttl", 0)):
-            self._table.delete_item(Key={"token": f"mask-rev:{pt_hash}"})
-            return None
+        try:
+            resp = self._table.get_item(Key={"token": f"mask-rev:{pt_hash}"})
+            item = resp.get("Item")
+            if not item:
+                return None
             
-        token = item.get("plaintext")
-        # Verify the actual token still exists
-        return token if self.retrieve(token) is not None else None
+            now = time.time()
+            if now > item.get("ttl", 0):
+                self._table.delete_item(Key={"token": f"mask-rev:{pt_hash}"})
+                return None
+            
+            token = item.get("ciphertext")
+            # Verify primary entry still exists
+            return token if self.retrieve(token) else None
+        except:
+            return None
 
     def retrieve(self, token: str) -> Optional[str]:
-        import time as _time
-        resp = self._table.get_item(Key={"token": f"mask:{token}"})
-        item = resp.get("Item")
-        if item is None:
+        try:
+            resp = self._table.get_item(Key={"token": f"mask:{token}"})
+            item = resp.get("Item")
+            if not item:
+                return None
+            
+            now = time.time()
+            if now > item.get("ttl", 0):
+                pt_hash = item.get("ptr_hash")
+                if pt_hash:
+                    self._table.delete_item(Key={"token": f"mask-rev:{pt_hash}"})
+                self._table.delete_item(Key={"token": f"mask:{token}"})
+                return None
+            
+            return item.get("ciphertext")
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"DynamoDB read failed: {e}")
             return None
-        if int(_time.time()) > int(item.get("ttl", 0)):
-            # Use the stored ptr_hash (not the ciphertext) to clean reverse mapping
-            pt_hash = item.get("ptr_hash")
-            if pt_hash:
-                self._table.delete_item(Key={"token": f"mask-rev:{pt_hash}"})
-            self._table.delete_item(Key={"token": f"mask:{token}"})
-            return None
-        return item.get("plaintext")
 
     def delete(self, token: str) -> None:
-        # Get the full item to extract the stored ptr_hash
-        resp = self._table.get_item(Key={"token": f"mask:{token}"})
-        item = resp.get("Item")
-        if item:
-            pt_hash = item.get("ptr_hash")
-            if pt_hash:
-                self._table.delete_item(Key={"token": f"mask-rev:{pt_hash}"})
-        self._table.delete_item(Key={"token": f"mask:{token}"})
+        try:
+            resp = self._table.get_item(Key={"token": f"mask:{token}"})
+            item = resp.get("Item")
+            if item and item.get("ptr_hash"):
+                self._table.delete_item(Key={"token": f"mask-rev:{item['ptr_hash']}"})
+            self._table.delete_item(Key={"token": f"mask:{token}"})
+        except:
+            pass
 
-
-# Memcached implementation (lightweight distributed cache)
 
 class MemcachedVault(BaseVault):
-    """Memcached-backed vault as a lightweight alternative to Redis.
+    """Memcached-backed vault."""
 
-    Requires the `pymemcache` package and a reachable Memcached instance.
-    Configure via:
-        MASK_MEMCACHED_HOST (default: localhost)
-        MASK_MEMCACHED_PORT (default: 11211)
-    """
-
-    def __init__(self, **memcache_kwargs: Any) -> None:
+    def __init__(self, **options: Any):
         try:
-            from pymemcache.client.base import Client  # type: ignore
-        except ImportError:
-            raise ImportError(
-                "The 'pymemcache' package is required for MemcachedVault. "
-                "Install it with: pip install pymemcache"
-            )
-        host = os.environ.get("MASK_MEMCACHED_HOST", "localhost")
-        port = int(os.environ.get("MASK_MEMCACHED_PORT", "11211"))
-        
-        # Support passing explicit tls_context kwargs for mTLS
-        kwargs = dict(memcache_kwargs)
-        if "tls_context" not in kwargs:
-            # Check for generic `ssl_context` sometimes used and map it
-            if "ssl_context" in kwargs:
-                kwargs["tls_context"] = kwargs.pop("ssl_context")
+            from pymemcache.client.base import Client
+            host = os.environ.get("MASK_MEMCACHED_HOST", "localhost")
+            port = int(os.environ.get("MASK_MEMCACHED_PORT", "11211"))
+            self._client = Client((host, port), **options)
+            logger.info("MemcachedVault connected to %s:%s", host, port)
+        except Exception as e:
+            raise MaskVaultConnectionError(f"Failed to connect to Memcached: {e}")
 
-        self._client = Client((host, port), **kwargs)
-        logger.info("MemcachedVault connected to %s:%d", host, port)
-
-    def store(self, token: str, plaintext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
-        self._client.set(f"mask:{token}", plaintext, expire=ttl_seconds)
-        if pt_hash:
-            self._client.set(f"mask-rev:{pt_hash}", token, expire=ttl_seconds)
-            # Store the hash so delete() can clean up the reverse mapping
-            self._client.set(f"mask-hash:{token}", pt_hash, expire=ttl_seconds)
+    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+        try:
+            data = {f"mask:{token}": ciphertext}
+            if pt_hash:
+                data[f"mask-rev:{pt_hash}"] = token
+                data[f"mask-hash:{token}"] = pt_hash
+            self._client.set_multi(data, expire=ttl_seconds)
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"Memcached write failed: {e}")
 
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
-        val = self._client.get(f"mask-rev:{pt_hash}")
-        if val is None:
+        try:
+            val = self._client.get(f"mask-rev:{pt_hash}")
+            if not val:
+                return None
+            token = val.decode("utf-8") if isinstance(val, bytes) else str(val)
+            return token if self.retrieve(token) else None
+        except:
             return None
-        token = val.decode("utf-8") if isinstance(val, bytes) else val
-        # Verify primary key exists
-        return token if self.retrieve(token) is not None else None
 
     def retrieve(self, token: str) -> Optional[str]:
-        val = self._client.get(f"mask:{token}")
-        if val is None:
+        try:
+            val = self._client.get(f"mask:{token}")
+            if not val:
+                return None
+            return val.decode("utf-8") if isinstance(val, bytes) else str(val)
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"Memcached read failed: {e}")
             return None
-        return val.decode("utf-8") if isinstance(val, bytes) else val
 
     def delete(self, token: str) -> None:
-        # Look up the stored pt_hash (not the ciphertext)
-        hash_val = self._client.get(f"mask-hash:{token}")
-        pt_hash = hash_val.decode("utf-8") if isinstance(hash_val, bytes) else hash_val
-        self._client.delete(f"mask:{token}")
-        self._client.delete(f"mask-hash:{token}")
-        if pt_hash:
-            self._client.delete(f"mask-rev:{pt_hash}")
+        try:
+            pt_hash = self._client.get(f"mask-hash:{token}")
+            keys = [f"mask:{token}", f"mask-hash:{token}"]
+            if pt_hash:
+                h = pt_hash.decode("utf-8") if isinstance(pt_hash, bytes) else str(pt_hash)
+                keys.append(f"mask-rev:{h}")
+            self._client.delete_multi(keys)
+        except:
+            pass
 
 
 # Singleton accessor
 
 _vault_instance: Optional[BaseVault] = None
-
-DEFAULT_TTL = int(os.environ.get("MASK_VAULT_TTL", "600"))  # 10 min
-
+DEFAULT_TTL = int(os.environ.get("MASK_VAULT_TTL", "600"))
 
 def get_vault() -> BaseVault:
-    """Return the configured vault singleton (lazy-init)."""
     global _vault_instance
     if _vault_instance is None:
         vault_type = os.environ.get("MASK_VAULT_TYPE", "memory").lower()
         if vault_type == "redis":
             _vault_instance = RedisVault()
-        elif vault_type == "memory":
-            _vault_instance = MemoryVault()
         elif vault_type == "dynamodb":
             _vault_instance = DynamoDBVault()
         elif vault_type == "memcached":
             _vault_instance = MemcachedVault()
         else:
-            raise ValueError(
-                f"Unknown MASK_VAULT_TYPE='{vault_type}'. "
-                "Supported values: 'memory', 'redis', 'dynamodb', 'memcached'."
-            )
-        logger.info("Vault initialised: %s", type(_vault_instance).__name__)
+            _vault_instance = MemoryVault()
+        logger.info("Vault initialized: %s", _vault_instance.__class__.__name__)
     return _vault_instance
 
-
 def reset_vault() -> None:
-    """Reset the vault singleton.  Useful in tests."""
     global _vault_instance
     _vault_instance = None
 
 
-# Public convenience API  (encode / decode)
+# Public API
 
-def encode(raw_text: str, *, ttl: Optional[int] = None) -> str:
-    """Tokenise *raw_text*, encrypt it, store in vault, return the FPE token.
-    If *raw_text* has already been tokenised and is active, returns the existing token.
-    """
-    if looks_like_token(raw_text):
-        return raw_text
-
-    # Normalise whitespace to match generate_fpe_token() and _hash_plaintext()
-    raw_text = raw_text.strip()
+def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10) -> str:
+    if looks_like_token(text):
+        return text
 
     vault = get_vault()
-    pt_hash = _hash_plaintext(raw_text)
-    
-    # 1. Deduplication check
-    existing_token = vault.get_token_by_plaintext_hash(pt_hash)
-    if existing_token:
-        # Check if it actually exists in the primary store and hasn't expired.
-        # The backend should handle this, but just to be safe.
-        if vault.retrieve(existing_token) is not None:
-            logger.debug("encode  %s → %s (cached)", repr(raw_text)[:20], existing_token)
-            return existing_token
-    
-    # 2. Generate new token
-    token = generate_fpe_token(raw_text)
-    
-    # 3. Encrypt the plaintext before it touches the vault
     crypto = get_crypto_engine()
-    ciphertext = crypto.encrypt(raw_text)
-    
-    # 4. Store with reverse lookup hash
-    vault.store(token, ciphertext, ttl or DEFAULT_TTL, pt_hash=pt_hash)
-    
-    logger.debug("encode  %s → %s (new)", repr(raw_text)[:20], token)
+    index_secret = crypto.get_index_secret()
+    pt_hash = _hash_plaintext(text, index_secret)
+
+    # 1. Deduplication check
+    existing = vault.get_token_by_plaintext_hash(pt_hash)
+    if existing and vault.retrieve(existing):
+        get_audit_logger().log("dedup", existing)
+        return existing
+
+    # 2. Generate new token
+    token = generate_fpe_token(text)
+    ciphertext = crypto.encrypt(text)
+    effective_ttl = ttl or DEFAULT_TTL
+
+    # 3. Store primary record
+    vault.store(token, ciphertext, effective_ttl, pt_hash)
+
+    # 4. Search buckets
+    if search_buckets:
+        for b_type in search_buckets:
+            if b_type == "numeric":
+                b_val = BucketManager.numeric_bucket(text, search_bucket_size)
+            else:
+                b_val = BucketManager.date_bucket(text, b_type)
+            b_hash = BucketManager.get_bucket_index(b_val)
+            # Store ADDITIONAL reverse mapping for the SAME token
+            vault.store(token, ciphertext, effective_ttl, b_hash)
+
+    get_audit_logger().log("encode", token)
     return token
 
-
-class DecodeError(Exception):
-    """Raised when strict detokenisation fails for a token."""
-
-
 def decode(token: str) -> str:
-    """Detokenise *token* via O(1) vault lookup and decrypt it.
-
-    This strict helper either returns plaintext or raises ``DecodeError``:
-
-    - If the token is missing or expired, a ``DecodeError`` is raised.
-    - If decryption fails, a ``DecodeError`` is raised.
-    """
-    ciphertext = get_vault().retrieve(token)
+    vault = get_vault()
+    ciphertext = vault.retrieve(token)
     if ciphertext is None:
-        logger.warning("Token not found or expired: %s", token)
-        raise DecodeError("Token not found or expired")
+        raise DecodeError("Token expired or missing")
 
     try:
         crypto = get_crypto_engine()
         plaintext = crypto.decrypt(ciphertext)
-    except Exception as exc:
-        logger.error("Failed to decrypt token %s payload.", token)
-        raise DecodeError("Failed to decrypt token payload") from exc
-
-    logger.debug("decode  %s → %s", token, repr(plaintext)[:20])
-    return plaintext
-
+        get_audit_logger().log("decode", token)
+        return plaintext
+    except Exception as e:
+        logger.error("Failed to decrypt token %s: %s", token, e)
+        raise DecodeError(f"Decryption failed for token {token}: {e}")
 
 def _decode_lenient(token: str) -> str:
-    """Internal helper used by integrations that prefer lenient semantics.
-
-    Returns plaintext when strict ``decode`` succeeds, otherwise falls back
-    to returning the original *token* string. This preserves legacy behaviour
-    for callers that explicitly opt in to resilience over strictness.
-    """
+    """Attempt to decode a token; return the token itself on failure (no raise)."""
     try:
         return decode(token)
-    except DecodeError:
+    except:
         return token
 
+def adecode(token: str):
+    import asyncio
+    return asyncio.to_thread(decode, token)
 
-import asyncio
-
-
-async def aencode(raw_text: str, *, ttl: Optional[int] = None) -> str:
-    """Async wrapper for ``encode()``."""
-    return await asyncio.to_thread(encode, raw_text, ttl=ttl)
-
-
-async def adecode(token: str) -> str:
-    """Async wrapper for ``decode()``."""
-    return await asyncio.to_thread(decode, token)
-
-
-import re
-
+def aencode(text: str, **kwargs):
+    import asyncio
+    return asyncio.to_thread(encode, text, **kwargs)
 
 def detokenize_text(text: str) -> str:
-    """Find all Mask tokens within *text* and replace them with their original plaintext.
-
-    Unlike ``decode()``, this works on entire paragraphs/messages containing
-    embedded tokens (e.g. email bodies). Uses lenient detokenization: if a
-    token is unknown or expired, it is left as-is.
-    """
-    if not text or not isinstance(text, str):
-        return text
-
+    import re
     from mask_privacy.core.fpe import TOKEN_PATTERN
+    
+    def replace_match(match):
+        try:
+            return decode(match.group(0))
+        except:
+            return match.group(0)
 
-    def _replace(match: re.Match) -> str:
-        token = match.group(0)
-        return _decode_lenient(token)
+    return re.sub(TOKEN_PATTERN, replace_match, text)
 
-    return TOKEN_PATTERN.sub(_replace, text)
-
-
-async def adetokenize_text(text: str) -> str:
-    """Async wrapper for ``detokenize_text()``."""
-    return await asyncio.to_thread(detokenize_text, text)
+def adetokenize_text(text: str):
+    import asyncio
+    return asyncio.to_thread(detokenize_text, text)

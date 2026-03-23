@@ -3,7 +3,7 @@ import { encode, resetVault } from '../src/core/vault';
 import { resetMasterKey } from '../src/core/fpe';
 import { decryptBeforeTool, encryptAfterTool } from '../src/integrations/adk_hooks';
 import { deepDecode, deepEncodePII } from '../src/core/utils';
-import { looksLikeToken } from '../src/core/fpe';
+import { looksLikeToken } from '../src/core/fpe_utils';
 import * as process from 'process';
 
 // Minimal stubs matching ADK protocol

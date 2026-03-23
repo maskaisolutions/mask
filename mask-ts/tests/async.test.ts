@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from '@jest/globals';
 import { aencode, adecode, resetVault, encode, decode } from '../src/core/vault';
-import { resetMasterKey, looksLikeToken } from '../src/core/fpe';
+import { resetMasterKey } from '../src/core/fpe';
+import { looksLikeToken } from '../src/core/fpe_utils';
 import { MaskClient } from '../src/client';
 import * as process from 'process';
 

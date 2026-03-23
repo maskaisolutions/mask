@@ -21,3 +21,6 @@ export class MaskDecryptionError extends MaskError {}
 
 /** Raised when spaCy / Presidio analysis exceeds the time budget. */
 export class MaskNLPTimeout extends MaskError {}
+
+/** Raised when mandatory security keys (MASK_MASTER_KEY, etc.) are missing. */
+export class MaskSecurityError extends MaskError {}

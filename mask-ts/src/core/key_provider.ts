@@ -29,102 +29,146 @@ import * as process from 'process';
  */
 export abstract class BaseKeyProvider {
   /** Return the Fernet encryption key, or null to auto-generate. */
-  abstract getEncryptionKey(): string | null;
+  abstract getEncryptionKey(): Promise<string | null> | string | null;
 
   /** Return the HMAC master key, or null to auto-generate. */
-  abstract getMasterKey(): string | null;
+  abstract getMasterKey(): Promise<string | null> | string | null;
 }
 
 /**
  * Default provider: reads keys from environment variables.
  *
  * This preserves backwards compatibility with existing deployments.
+ * If MASK_STRICT_PROD is set to 'true', this provider will throw an error
+ * when keys are missing instead of returning null (fail-shut behavior).
  */
 export class EnvKeyProvider extends BaseKeyProvider {
-  getEncryptionKey(): string | null {
-    return process.env.MASK_ENCRYPTION_KEY || null;
+  async getEncryptionKey(): Promise<string | null> {
+    const key = process.env.MASK_ENCRYPTION_KEY || null;
+    if (!key && process.env.MASK_STRICT_PROD === 'true') {
+      throw new Error(
+        'MASK_STRICT_PROD is enabled but MASK_ENCRYPTION_KEY is not set. ' +
+        'Refusing to start with an auto-generated key in production mode.'
+      );
+    }
+    return key;
   }
 
-  getMasterKey(): string | null {
+  async getMasterKey(): Promise<string | null> {
     let key = process.env.MASK_MASTER_KEY || "";
     if (!key) {
       key = process.env.MASK_ENCRYPTION_KEY || "";
+    }
+    if (!key && process.env.MASK_STRICT_PROD === 'true') {
+      throw new Error(
+        'MASK_STRICT_PROD is enabled but MASK_MASTER_KEY is not set. ' +
+        'Refusing to start with an auto-generated key in production mode.'
+      );
     }
     return key || null;
   }
 }
 
 /**
- * AWS KMS-backed key provider (stub — implement with AWS SDK).
+ * AWS KMS-backed key provider.
  *
- * Usage:
- *
- *     setKeyProvider(new AwsKmsKeyProvider("alias/mask-encryption-key", "us-east-1"));
- *
- * Requires AWS SDK and valid AWS credentials.
+ * Requires ``@aws-sdk/client-kms`` and ``@aws-sdk/client-secrets-manager``.
  */
 export class AwsKmsKeyProvider extends BaseKeyProvider {
-  constructor(public keyId: string, public region: string = "us-east-1") {
+  private _client: any = null;
+
+  constructor(public readonly keyId: string, public readonly region: string = "us-east-1") {
     super();
   }
 
-  getEncryptionKey(): string | null {
-    throw new Error(
-      "AwsKmsKeyProvider.getEncryptionKey() is a stub. " +
-      "Implement with AWS SDK KMS GenerateDataKey / Decrypt to " +
-      "retrieve the Fernet key from AWS KMS."
-    );
+  private async _getSecretsClient() {
+    if (!this._client) {
+      const { SecretsManagerClient } = require("@aws-sdk/client-secrets-manager");
+      this._client = new SecretsManagerClient({ region: this.region });
+    }
+    return this._client;
   }
 
-  getMasterKey(): string | null {
-    throw new Error(
-      "AwsKmsKeyProvider.getMasterKey() is a stub. " +
-      "Implement with AWS SDK KMS to retrieve the HMAC master key."
-    );
+  async getEncryptionKey(): Promise<string | null> {
+    try {
+      const { GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
+      const client = await this._getSecretsClient();
+      const response = await client.send(new GetSecretValueCommand({ SecretId: this.keyId }));
+      return response.SecretString || null;
+    } catch (e) {
+      console.error("AWS SecretsManager retrieval failed:", e);
+      throw e;
+    }
+  }
+
+  async getMasterKey(): Promise<string | null> {
+    return await this.getEncryptionKey();
   }
 }
 
 /**
- * Azure Key Vault-backed key provider (stub — implement with Azure SDK).
+ * Azure Key Vault-backed key provider.
  */
 export class AzureKeyVaultProvider extends BaseKeyProvider {
-  constructor(public vaultUrl: string) {
+  private _client: any = null;
+
+  constructor(public readonly vaultUrl: string, public readonly secretName: string = "mask-encryption-key") {
     super();
   }
 
-  getEncryptionKey(): string | null {
-    throw new Error(
-      "AzureKeyVaultProvider.getEncryptionKey() is a stub. " +
-      "Implement with @azure/keyvault-secrets SecretClient."
-    );
+  private async _getClient() {
+    if (!this._client) {
+      const { SecretClient } = require("@azure/keyvault-secrets");
+      const { DefaultAzureCredential } = require("@azure/identity");
+      this._client = new SecretClient(this.vaultUrl, new DefaultAzureCredential());
+    }
+    return this._client;
   }
 
-  getMasterKey(): string | null {
-    throw new Error(
-      "AzureKeyVaultProvider.getMasterKey() is a stub. " +
-      "Implement with @azure/keyvault-secrets SecretClient."
-    );
+  async getEncryptionKey(): Promise<string | null> {
+    try {
+      const client = await this._getClient();
+      const secret = await client.getSecret(this.secretName);
+      return secret.value || null;
+    } catch (e) {
+      console.error("Azure Key Vault retrieval failed:", e);
+      throw e;
+    }
+  }
+
+  async getMasterKey(): Promise<string | null> {
+    return await this.getEncryptionKey();
   }
 }
 
 /**
- * HashiCorp Vault-backed key provider (stub).
+ * HashiCorp Vault-backed key provider.
  */
 export class HashiCorpVaultProvider extends BaseKeyProvider {
-  constructor(public vaultAddr: string, public secretPath: string = "secret/data/mask") {
+  private _token: string | undefined;
+
+  constructor(public readonly vaultAddr: string, public readonly secretPath: string = "secret/data/mask", token?: string) {
     super();
+    this._token = token || process.env.VAULT_TOKEN;
   }
 
-  getEncryptionKey(): string | null {
-    throw new Error(
-      "HashiCorpVaultProvider.getEncryptionKey() is a stub."
-    );
+  async getEncryptionKey(): Promise<string | null> {
+    try {
+      const axios = require("axios");
+      const url = `${this.vaultAddr}/v1/${this.secretPath}`;
+      const response = await axios.get(url, {
+        headers: { "X-Vault-Token": this._token }
+      });
+      const data = response.data?.data?.data || response.data?.data;
+      return data?.encryption_key || data?.value || null;
+    } catch (e) {
+      console.error("HashiCorp Vault retrieval failed:", e);
+      throw e;
+    }
   }
 
-  getMasterKey(): string | null {
-    throw new Error(
-      "HashiCorpVaultProvider.getMasterKey() is a stub."
-    );
+  async getMasterKey(): Promise<string | null> {
+    return await this.getEncryptionKey();
   }
 }
 

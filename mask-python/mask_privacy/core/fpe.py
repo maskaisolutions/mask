@@ -48,6 +48,12 @@ def _get_master_key() -> bytes:
             import secrets
             raw = secrets.token_hex(32)
             os.environ["MASK_MASTER_KEY"] = raw
+            if os.environ.get("MASK_ALLOW_INSECURE_KEYS") != "true":
+                from mask_privacy.core.exceptions import MaskSecurityError
+                raise MaskSecurityError(
+                    "MASK_MASTER_KEY not set and MASK_ALLOW_INSECURE_KEYS is not 'true'. "
+                    "Refusing to proceed in production mode."
+                )
             logger.warning(
                 "MASK_MASTER_KEY not set. Using an ephemeral session key. "
                 "Tokens will NOT be reproducible across process restarts."

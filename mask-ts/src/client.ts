@@ -5,16 +5,16 @@
  * bundles vault, crypto, scanner, and audit logger into a single object.
  */
 
-import { BaseVault, getVault, decode, encode, detokenizeText } from './core/vault';
-import { CryptoEngine, getCryptoEngine } from './core/crypto';
-import { PresidioScanner, getScanner } from './core/scanner';
-import { generateFPEToken, looksLikeToken } from './core/fpe';
+import { BaseVault, getVault, decode, encode, detokenizeText, _hashPlaintext } from './core/vault';
+import { CryptoEngine, getCryptoEngine, getCryptoEngineAsync } from './core/crypto';
+import { BaseScanner, getScanner } from './core/scanner';
+import { looksLikeToken } from './core/fpe_utils';
 import { AuditLogger, getAuditLogger } from './telemetry/audit_logger';
 
 export class MaskClient {
   public vault: BaseVault;
   public crypto: CryptoEngine;
-  public scanner: PresidioScanner;
+  public scanner: BaseScanner;
   public auditLogger: AuditLogger;
   /** backward compat alias */
   public logger: AuditLogger;
@@ -22,14 +22,11 @@ export class MaskClient {
 
   /**
    * Initialise the client with specific component instances.
-   *
-   * If an instance is not provided, the client will fall back to
-   * the standard environment-configured singleton for that component.
    */
   constructor(options: {
     vault?: BaseVault;
     crypto?: CryptoEngine;
-    scanner?: PresidioScanner;
+    scanner?: BaseScanner;
     auditLogger?: AuditLogger;
     ttl?: number;
   } = {}) {
@@ -45,24 +42,40 @@ export class MaskClient {
   }
 
   /**
+   * Static factory to create an initialized MaskClient.
+   */
+  public static async create(options: {
+    vault?: BaseVault;
+    crypto?: CryptoEngine;
+    scanner?: BaseScanner;
+    auditLogger?: AuditLogger;
+    ttl?: number;
+  } = {}): Promise<MaskClient> {
+    const vault = options.vault || getVault();
+    const crypto = options.crypto || await getCryptoEngineAsync();
+    const scanner = options.scanner || getScanner();
+    const auditLogger = options.auditLogger || getAuditLogger();
+    
+    return new MaskClient({
+      vault,
+      crypto,
+      scanner,
+      auditLogger,
+      ttl: options.ttl
+    });
+  }
+
+  /**
    * Tokenise rawText, encrypt it, and store it in the vault.
-   *
-   * Includes deduplication: if the same plaintext has been encoded
-   * before and the token is still active, the existing token is returned.
    */
   async encode(rawText: string): Promise<string> {
-    // Token Guard: never re-encode a value that is already a Mask token
-    if (looksLikeToken(rawText)) {
+    if (looks_like_token_fallback(rawText)) {
       return rawText;
     }
 
-    // Normalise whitespace so " Alice " and "Alice" share the same hash
     const text = rawText.trim();
-
-    // 1. Deduplication check
-    // We'll use the vault methods directly here to match Python client logic
-    const cryptoSub = require('crypto');
-    const ptHash = cryptoSub.createHash('sha256').update(text, 'utf-8').digest('hex');
+    const indexSecret = await this.crypto.getIndexSecret();
+    const ptHash = _hashPlaintext(text, indexSecret);
 
     const existingToken = await this.vault.getTokenByPlaintextHash(ptHash);
     if (existingToken && (await this.vault.retrieve(existingToken)) !== null) {
@@ -70,33 +83,18 @@ export class MaskClient {
       return existingToken;
     }
 
-    // 2. Generate deterministic token
-    const token = generateFPEToken(text);
-
-    // 3. Encrypt
-    const ciphertext = this.crypto.encrypt(text);
-
-    // 4. Store with reverse lookup hash
-    await this.vault.store(token, ciphertext, this.ttl, ptHash);
-
-    this.logger.log("encode", token, "opaque");
-    return token;
+    return await encode(rawText, { ttl: this.ttl });
   }
 
   /** Retrieve token from vault and decrypt it. */
   async decode(token: string): Promise<string> {
-    const ciphertext = await this.vault.retrieve(token);
-    if (ciphertext === null) {
-      this.logger.log("expired", token, "opaque");
-      return token;
-    }
-
     try {
-      const plaintext = this.crypto.decrypt(ciphertext);
-      this.logger.log("decode", token, "opaque");
-      return plaintext;
+      return await decode(token);
     } catch (e) {
       this.logger.log("error", token, "opaque", "decryption_failed");
+      if (process.env.MASK_STRICT_PROD === 'true') {
+        throw e;
+      }
       return token;
     }
   }
@@ -132,4 +130,13 @@ export class MaskClient {
   async adetokenizeText(text: string): Promise<string> {
     return await this.detokenizeText(text);
   }
+}
+
+/** Fallback to avoid early evaluation issues during circular loads */
+function looks_like_token_fallback(val: string): boolean {
+    try {
+        return looksLikeToken(val);
+    } catch {
+        return false;
+    }
 }

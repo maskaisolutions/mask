@@ -6,15 +6,54 @@
  *   - stdout / Console (default)
  *   - Customer SIEM via structured JSON log lines
  *
- * NOTE: This SDK is LOCAL-FIRST. Audits are stored in a local
- * SQLite file (.mask_audit.db) and are NOT sent anywhere externally.
+ * Provides the SOC2 / HIPAA audit trail.
  */
 
 import * as process from 'process';
-import * as path from 'path';
-import * as fs from 'fs';
 
-// Deferring Database require to avoid Jest/Native module issues at top level
+// ---------------------------------------------------------------------------
+// Internal SDK Logger (replaces scattered console.info calls)
+// ---------------------------------------------------------------------------
+
+const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
+type LogLevel = keyof typeof LOG_LEVELS;
+
+function _getLogLevel(): LogLevel {
+  const env = (process.env.MASK_LOG_LEVEL || 'info').toLowerCase();
+  return (env in LOG_LEVELS) ? env as LogLevel : 'info';
+}
+
+/**
+ * Lightweight internal logger matching Python's logging pattern.
+ * Usage: `const log = getLogger('mask.scanner'); log.info('...');`
+ */
+export function getLogger(name: string) {
+  const level = _getLogLevel();
+  const threshold = LOG_LEVELS[level];
+
+  const _log = (lvl: LogLevel, ...args: any[]) => {
+    if (LOG_LEVELS[lvl] >= threshold) {
+      const prefix = `[${name}]`;
+      switch (lvl) {
+        case 'debug': console.debug(prefix, ...args); break;
+        case 'info':  console.info(prefix, ...args); break;
+        case 'warn':  console.warn(prefix, ...args); break;
+        case 'error': console.error(prefix, ...args); break;
+      }
+    }
+  };
+
+  return {
+    debug: (...args: any[]) => _log('debug', ...args),
+    info:  (...args: any[]) => _log('info', ...args),
+    warn:  (...args: any[]) => _log('warn', ...args),
+    error: (...args: any[]) => _log('error', ...args),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Audit Event Schema
+// ---------------------------------------------------------------------------
 
 /** Event schema helper */
 function _makeEvent(
@@ -39,44 +78,25 @@ function _makeEvent(
     return event;
 }
 
+// ---------------------------------------------------------------------------
+// AuditLogger
+// ---------------------------------------------------------------------------
+
+const _logger = getLogger('mask.audit');
+
 export class AuditLogger {
     private static _instance: AuditLogger | null = null;
-    private _dbPath: string;
     private _flushInterval: number = 5000; // ms
     private _running: boolean = false;
     private _timer: NodeJS.Timeout | null = null;
+    private _isFlushing: boolean = false;
     private _buffer: Record<string, any>[] = [];
-    private _dbDisabled: boolean;
-    private _db: any; // better-sqlite3 Database
+    private _maxBufferSize: number;
+    private _bufferFullWarned: boolean = false;
+    private _shutdownRegistered: boolean = false;
 
     private constructor() {
-        this._dbPath = process.env.MASK_AUDIT_DB || ".mask_audit.db";
-        this._dbDisabled = ["1", "true", "yes"].includes((process.env.MASK_DISABLE_AUDIT_DB || "").toLowerCase());
-
-        if (this._dbDisabled) {
-            console.info("MASK_DISABLE_AUDIT_DB is set – audit events will not be persisted to SQLite on disk.");
-            return;
-        }
-
-        try {
-            const Database = require('better-sqlite3');
-            this._db = new Database(this._dbPath);
-            this._db.exec(`
-                CREATE TABLE IF NOT EXISTS audit_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts REAL,
-                    action TEXT,
-                    token TEXT,
-                    data_type TEXT,
-                    agent TEXT,
-                    tool TEXT,
-                    extra_json TEXT
-                )
-            `);
-        } catch (e) {
-            console.error(`Failed to initialize AuditLogger SQLite DB: ${e}`);
-            this._dbDisabled = true;
-        }
+        this._maxBufferSize = parseInt(process.env.MASK_AUDIT_MAX_BUFFER_SIZE || "5000");
     }
 
     public static getInstance(): AuditLogger {
@@ -94,22 +114,21 @@ export class AuditLogger {
         tool: string = "",
         extra: Record<string, any> = {}
     ): void {
-        /** Append an event to the sqlite buffer (durable when enabled). */
+        /** Append an event to the memory buffer to be flushed asynchronously. */
         const event = _makeEvent(action, token, dataType, agent, tool, extra);
-        this._buffer.push(event);
-
-        const extraJson = Object.keys(extra).length > 0 ? JSON.stringify(extra) : null;
-
-        if (!this._dbDisabled && this._db) {
-            try {
-                const stmt = this._db.prepare(
-                    "INSERT INTO audit_events (ts, action, token, data_type, agent, tool, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        
+        if (this._buffer.length >= this._maxBufferSize) {
+            if (!this._bufferFullWarned) {
+                _logger.warn(
+                    `AuditLogger buffer full (max=${this._maxBufferSize}). Dropping newest events to prevent OOM.`
                 );
-                stmt.run(Date.now() / 1000, action, token, dataType, agent, tool, extraJson);
-            } catch (e) {
-                console.error(`Failed to write audit event to sqlite buffer: ${e}`);
+                this._bufferFullWarned = true;
             }
+            // Tail-drop: discard the incoming event instead of O(N) shift()
+            return;
         }
+        
+        this._buffer.push(event);
     }
 
     public start(): void {
@@ -117,47 +136,57 @@ export class AuditLogger {
         if (this._running) return;
         this._running = true;
         this._timer = setInterval(() => this._flush(), this._flushInterval);
+        // Unref to allow process exit if only the audit logger is running
+        if (this._timer && typeof this._timer.unref === 'function') {
+            this._timer.unref();
+        }
+
+        // Register graceful shutdown handlers (once)
+        // Skip in Jest to avoid leaking listeners between tests
+        if (!this._shutdownRegistered && !process.env.JEST_WORKER_ID) {
+            this._shutdownRegistered = true;
+            const gracefulShutdown = () => {
+                this._flushSync();
+            };
+            process.on('SIGTERM', gracefulShutdown);
+            process.on('SIGINT', gracefulShutdown);
+            process.on('beforeExit', gracefulShutdown);
+        }
     }
 
-    public stop(): void {
+    public async stop(): Promise<void> {
         /** Stop periodic flushing and drain remaining events. */
         this._running = false;
         if (this._timer) {
             clearInterval(this._timer);
             this._timer = null;
         }
-        this._flush();
+        await this._flush();
     }
 
-    private _flush(): void {
-        if (this._dbDisabled || !this._db) return;
-
+    private async _flush(): Promise<void> {
+        if (this._isFlushing || this._buffer.length === 0) return;
+        this._isFlushing = true;
         try {
-            const rows = this._db.prepare("SELECT * FROM audit_events ORDER BY id ASC LIMIT 1000").all();
-            if (rows.length === 0) return;
+            const events = [...this._buffer];
+            this._buffer = [];
+            this._bufferFullWarned = false;
 
-            for (const row of rows) {
-                const evt: Record<string, any> = {
-                    ts: row.ts,
-                    action: row.action,
-                    token: row.token,
-                    data_type: row.data_type,
-                    agent: row.agent,
-                    tool: row.tool,
-                };
-                if (row.extra_json) {
-                    try {
-                        Object.assign(evt, JSON.parse(row.extra_json));
-                    } catch (e) {}
-                }
+            for (const evt of events) {
                 console.info(JSON.stringify(evt));
             }
+        } finally {
+            this._isFlushing = false;
+        }
+    }
 
-            const ids = rows.map((r: any) => r.id);
-            const placeholders = ids.map(() => '?').join(',');
-            this._db.prepare(`DELETE FROM audit_events WHERE id IN (${placeholders})`).run(...ids);
-        } catch (e) {
-            console.error(`Failed to flush audit events from sqlite db: ${e}`);
+    /** Synchronous flush for use in signal handlers where async is unreliable. */
+    private _flushSync(): void {
+        if (this._buffer.length === 0) return;
+        const events = [...this._buffer];
+        this._buffer = [];
+        for (const evt of events) {
+            process.stdout.write(JSON.stringify(evt) + '\n');
         }
     }
 }

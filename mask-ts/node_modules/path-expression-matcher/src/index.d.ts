@@ -189,6 +189,153 @@ export interface MatcherSnapshot {
 }
 
 /**
+ * ReadOnlyMatcher - A safe, read-only view over a {@link Matcher} instance.
+ *
+ * Returned by {@link Matcher.readOnly}. Exposes all query and inspection
+ * methods but **throws a `TypeError`** if any state-mutating method is called
+ * (`push`, `pop`, `reset`, `updateCurrent`, `restore`).  Direct property
+ * writes are also blocked.
+ *
+ * Pass this to consumers that only need to inspect or match the current path
+ * so they cannot accidentally corrupt the parser state.
+ *
+ * @example
+ * ```typescript
+ * const matcher = new Matcher();
+ * matcher.push("root", {});
+ * matcher.push("users", {});
+ * matcher.push("user", { id: "123" });
+ *
+ * const ro: ReadOnlyMatcher = matcher.readOnly();
+ *
+ * ro.matches(expr);      // ✓ works
+ * ro.getCurrentTag();    // ✓ "user"
+ * ro.getDepth();         // ✓ 3
+ * ro.push("child", {}); // ✗ TypeError: Cannot call 'push' on a read-only Matcher
+ * ro.reset();            // ✗ TypeError: Cannot call 'reset' on a read-only Matcher
+ * ```
+ */
+export interface ReadOnlyMatcher {
+  /**
+   * Default path separator (read-only)
+   */
+  readonly separator: string;
+
+  /**
+   * Current path stack (each node is a frozen copy)
+   */
+  readonly path: ReadonlyArray<Readonly<PathNode>>;
+
+  // ── Query methods ───────────────────────────────────────────────────────────
+
+  /**
+   * Get current tag name
+   * @returns Current tag name or undefined if path is empty
+   */
+  getCurrentTag(): string | undefined;
+
+  /**
+   * Get current namespace
+   * @returns Current namespace or undefined if not present or path is empty
+   */
+  getCurrentNamespace(): string | undefined;
+
+  /**
+   * Get current node's attribute value
+   * @param attrName - Attribute name
+   * @returns Attribute value or undefined
+   */
+  getAttrValue(attrName: string): any;
+
+  /**
+   * Check if current node has an attribute
+   * @param attrName - Attribute name
+   */
+  hasAttr(attrName: string): boolean;
+
+  /**
+   * Get current node's sibling position (child index in parent)
+   * @returns Position index or -1 if path is empty
+   */
+  getPosition(): number;
+
+  /**
+   * Get current node's repeat counter (occurrence count of this tag name)
+   * @returns Counter value or -1 if path is empty
+   */
+  getCounter(): number;
+
+  /**
+   * Get current node's sibling index (alias for getPosition for backward compatibility)
+   * @returns Index or -1 if path is empty
+   * @deprecated Use getPosition() or getCounter() instead
+   */
+  getIndex(): number;
+
+  /**
+   * Get current path depth
+   * @returns Number of nodes in the path
+   */
+  getDepth(): number;
+
+  /**
+   * Get path as string
+   * @param separator - Optional separator (uses default if not provided)
+   * @param includeNamespace - Whether to include namespace in output
+   * @returns Path string (e.g., "root.users.user" or "ns:root.ns:users.user")
+   */
+  toString(separator?: string, includeNamespace?: boolean): string;
+
+  /**
+   * Get path as array of tag names
+   * @returns Array of tag names
+   */
+  toArray(): string[];
+
+  /**
+   * Match current path against an Expression
+   * @param expression - The expression to match against
+   * @returns True if current path matches the expression
+   */
+  matches(expression: Expression): boolean;
+
+  /**
+   * Create a snapshot of current state
+   * @returns State snapshot that can be restored later
+   */
+  snapshot(): MatcherSnapshot;
+
+  // ── Blocked mutating methods ────────────────────────────────────────────────
+  // These are present in the type so callers get a compile-time error with a
+  // helpful message instead of a silent "property does not exist" error.
+
+  /**
+   * @throws {TypeError} Always – mutation is not allowed on a read-only view.
+   */
+  push(tagName: string, attrValues?: Record<string, any> | null, namespace?: string | null): never;
+
+  /**
+   * @throws {TypeError} Always – mutation is not allowed on a read-only view.
+   */
+  pop(): never;
+
+  /**
+   * @throws {TypeError} Always – mutation is not allowed on a read-only view.
+   */
+  updateCurrent(attrValues: Record<string, any>): never;
+
+  /**
+   * @throws {TypeError} Always – mutation is not allowed on a read-only view.
+   */
+  reset(): never;
+
+  /**
+   * @throws {TypeError} Always – mutation is not allowed on a read-only view.
+   */
+  restore(snapshot: MatcherSnapshot): never;
+}
+
+/**
  * Matcher - Tracks current path in XML/JSON tree and matches against Expressions
  * 
  * The matcher maintains a stack of nodes representing the current path from root to
@@ -353,6 +500,11 @@ export class Matcher {
    * @param snapshot - State snapshot from previous snapshot() call
    */
   restore(snapshot: MatcherSnapshot): void;
+
+  /**
+   * Return a read-only view of this matcher.
+   */
+  readOnly(): ReadOnlyMatcher;
 }
 
 /**

@@ -38,7 +38,8 @@ Additionally, we solve two critical sub-issues to make this enterprise-ready:
 Mask is designed to be **Local-First**. By default, it operates entirely within your application's process using an in-memory vault. This ensures zero latency and maximum privacy out of the box.
 
 *   **Local Use (Standard):** We use a `MemoryVault`. It's fast, free, and keeps data in your RAM. 
-*   **Distributed Use (Scalability):** For high-availability or multi-node environments, we provide backends for **Redis** and **DynamoDB**. These are intended for "Enterprise" or future "Hosted" versions where state must be shared across many servers.
+*   **Local NLP (TypeScript):** The TS SDK includes a built-in Transformers-based scanner (`LocalTransformersScanner`) by default, enabling high-accuracy PII detection without external dependencies.
+*   **Distributed Use (Scalability):** For high-availability or multi-node environments, we provide backends for **Redis** and **DynamoDB**.
 *   **Decryption Hooks:** Real math and business logic happen inside your local tools, after Mask has safely swapped the tokens back to real data just-in-time.
 
 ---
@@ -58,7 +59,7 @@ The Data Plane is the open-source, transparent, auditable runtime execution laye
 *   **JIT Cryptography Engines:** The core pre-tool decryption and post-tool encryption hooks that intercept and mutate data in-flight.
 *   **Format-Preserving Tokenization Router:** Ensures downstream databases and strict schemas don't break when handed a token. Tokens look like real data; the real values are stored encrypted and retrieved via the vault.
 *   **Pluggable Distributed Vaults:** Support for enterprise-native caching layers (Redis, DynamoDB, Memcached) to ensure horizontally-scaled edge agents have synchronized access to detokenization mapping.
-*   **Local Audit Logger:** An asynchronous AuditLogger that buffers privacy events to a local SQLite database and emits structured JSON logs for SIEM ingestion.
+*   **Local Audit Logger:** An asynchronous AuditLogger that buffers privacy events in memory and emits structured JSON logs to stdout for SIEM ingestion (Datadog, Splunk, etc.).
 
 ---
 
@@ -75,6 +76,15 @@ It is catastrophic if an SDK misidentifies a user's *real* SSN as a "token" and 
 * Routing tokens always begin with `0000` (The Federal Reserve valid range starts at 01).
 * Credit Card tokens use the `4000-0000-0000` Visa reserved test BIN. 
 By generating statistically impossible tokens, Mask guarantees it will never accidentally swallow real PII.
+
+### 3. Pluggable Key Management (Enterprise KMS)
+Mask supports a pluggable `BaseKeyProvider` architecture across all SDK languages. This allows enterprises to fetch encryption keys dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault at runtime, rather than relying on static environment variables.
+
+### 4. Fail-Shut Production Security
+Mask enforces a **Strict Production Mode** via the `MASK_STRICT_PROD` environment variable. 
+
+> [!IMPORTANT]
+> **Security Guarantee**: When `MASK_STRICT_PROD=true` is enabled, the SDK will refuse to initialize if a valid encryption key is missing or if an unimplemented KMS stub is used. This "Fail-Shut" behavior prevents the accidental use of insecure "throwaway" keys in production environments.
 
 ---
 
@@ -101,7 +111,7 @@ The SDKs include a thread-safe, asynchronous AuditLogger built-in.
 
 As your agents encrypt and decrypt data, the logger buffers these privacy events (Action, Agent, TTL). **Raw PII is never logged.** 
 
-Audit events are stored locally in a SQLite database (`.mask_audit.db`) and flushed to stdout as structured JSON. Pipe them into your existing Datadog or Splunk agents to generate compliance reports for your SOC2, HIPAA, or PCI-DSS auditors proving that your LLM infrastructure properly isolates sensitive data.
+Audit events are buffered in memory and flushed periodically to stdout as structured JSON. Pipe these logs into your existing Datadog or Splunk agents to generate compliance reports for your SOC2, HIPAA, or PCI-DSS auditors proving that your LLM infrastructure properly isolates sensitive data.
 
 ---
 

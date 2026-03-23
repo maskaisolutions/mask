@@ -63,91 +63,117 @@ class EnvKeyProvider(BaseKeyProvider):
 # Stub providers for enterprise key management services
 
 class AwsKmsKeyProvider(BaseKeyProvider):
-    """AWS KMS-backed key provider (stub — implement with boto3).
-
-    Usage::
-
-        from mask_privacy.core.key_provider import set_key_provider, AwsKmsKeyProvider
-        set_key_provider(AwsKmsKeyProvider(
-            key_id="alias/mask-encryption-key",
-            region="us-east-1",
-        ))
-
-    Requires ``boto3`` and valid AWS credentials.
+    """AWS KMS-backed key provider.
+    
+    Supports two modes:
+    1. **Envelope Encryption (Recommended)**: Decrypts a base64-encoded encrypted 
+       data key (EDK) from ``MASK_ENCRYPTED_KEY.``
+    2. **Secret-as-Key (Fallback)**: Retrieves a raw key from Secrets Manager 
+       using the ``key_id`` as the SecretId.
     """
 
     def __init__(self, key_id: str, region: str = "us-east-1") -> None:
         self.key_id = key_id
         self.region = region
+        self._kms = None
+        self._sm = None
+
+    def _get_kms(self):
+        if self._kms is None:
+            import boto3
+            self._kms = boto3.client("kms", region_name=self.region)
+        return self._kms
+
+    def _get_sm(self):
+        if self._sm is None:
+            import boto3
+            self._sm = boto3.client("secretsmanager", region_name=self.region)
+        return self._sm
 
     def get_encryption_key(self) -> Optional[str]:
-        raise NotImplementedError(
-            "AwsKmsKeyProvider.get_encryption_key() is a stub. "
-            "Implement with boto3 KMS GenerateDataKey / Decrypt to "
-            "retrieve the Fernet key from AWS KMS."
-        )
+        # Mode 1: Envelope Encryption (EDK in environment)
+        edk_b64 = os.environ.get("MASK_ENCRYPTED_KEY")
+        if edk_b64:
+            try:
+                import base64
+                ciphertext = base64.b64decode(edk_b64)
+                resp = self._get_kms().decrypt(
+                    CiphertextBlob=ciphertext,
+                    KeyId=self.key_id
+                )
+                plaintext = resp["Plaintext"]
+                # Fernet keys are base64-encoded 32 bytes
+                return base64.urlsafe_b64encode(plaintext).decode("utf-8")
+            except Exception as e:
+                logger.error("AWS KMS envelope decryption failed: %s", e)
+                raise
+
+        # Mode 2: Secret-as-Key fallback
+        try:
+            val = self._get_sm().get_secret_value(SecretId=self.key_id)
+            return val.get("SecretString")
+        except Exception as e:
+            logger.error("AWS Secrets Manager retrieval failed: %s", e)
+            raise
 
     def get_master_key(self) -> Optional[str]:
-        raise NotImplementedError(
-            "AwsKmsKeyProvider.get_master_key() is a stub. "
-            "Implement with boto3 KMS to retrieve the HMAC master key."
-        )
+        return self.get_encryption_key()
 
 
 class AzureKeyVaultProvider(BaseKeyProvider):
-    """Azure Key Vault-backed key provider (stub — implement with azure-keyvault-secrets).
+    """Azure Key Vault-backed key provider."""
 
-    Usage::
-
-        from mask_privacy.core.key_provider import set_key_provider, AzureKeyVaultProvider
-        set_key_provider(AzureKeyVaultProvider(
-            vault_url="https://my-vault.vault.azure.net",
-        ))
-    """
-
-    def __init__(self, vault_url: str) -> None:
+    def __init__(self, vault_url: str, secret_name: str = "mask-encryption-key") -> None:
         self.vault_url = vault_url
+        self.secret_name = secret_name
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            from azure.keyvault.secrets import SecretClient
+            from azure.identity import DefaultAzureCredential
+            self._client = SecretClient(vault_url=self.vault_url, credential=DefaultAzureCredential())
+        return self._client
 
     def get_encryption_key(self) -> Optional[str]:
-        raise NotImplementedError(
-            "AzureKeyVaultProvider.get_encryption_key() is a stub. "
-            "Implement with azure-keyvault-secrets SecretClient."
-        )
+        try:
+            secret = self._get_client().get_secret(self.secret_name)
+            return secret.value
+        except Exception as e:
+            logger.error("Azure Key Vault retrieval failed: %s", e)
+            raise
 
     def get_master_key(self) -> Optional[str]:
-        raise NotImplementedError(
-            "AzureKeyVaultProvider.get_master_key() is a stub. "
-            "Implement with azure-keyvault-secrets SecretClient."
-        )
+        return self.get_encryption_key()
 
 
 class HashiCorpVaultProvider(BaseKeyProvider):
-    """HashiCorp Vault-backed key provider (stub — implement with hvac).
+    """HashiCorp Vault-backed key provider."""
 
-    Usage::
-
-        from mask_privacy.core.key_provider import set_key_provider, HashiCorpVaultProvider
-        set_key_provider(HashiCorpVaultProvider(
-            vault_addr="https://vault.example.com:8200",
-            secret_path="secret/data/mask",
-        ))
-    """
-
-    def __init__(self, vault_addr: str, secret_path: str = "secret/data/mask") -> None:
+    def __init__(self, vault_addr: str, secret_path: str = "secret/data/mask", token: Optional[str] = None) -> None:
         self.vault_addr = vault_addr
         self.secret_path = secret_path
+        self.token = token or os.environ.get("VAULT_TOKEN")
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            import hvac
+            self._client = hvac.Client(url=self.vault_addr, token=self.token)
+        return self._client
 
     def get_encryption_key(self) -> Optional[str]:
-        raise NotImplementedError(
-            "HashiCorpVaultProvider.get_encryption_key() is a stub. "
-            "Implement with the `hvac` Python client."
-        )
+        try:
+            read_response = self._get_client().read(self.secret_path)
+            # Assuming standard kv-v2 structure
+            data = read_response.get("data", {}).get("data", {})
+            return data.get("encryption_key") or data.get("value")
+        except Exception as e:
+            logger.error("HashiCorp Vault retrieval failed: %s", e)
+            raise
 
     def get_master_key(self) -> Optional[str]:
-        raise NotImplementedError(
-            "HashiCorpVaultProvider.get_master_key() is a stub. "
-            "Implement with the `hvac` Python client."
-        )
+        return self.get_encryption_key()
 
 
 # Singleton accessor

@@ -1,5 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
-import { DynamoDBVault, MemcachedVault, _hashPlaintext } from '../src/core/vault';
+import { DynamoDBVault, MemcachedVault, _hashPlaintext, resetVault } from '../src/core/vault';
+import { resetKeyProvider } from '../src/core/key_provider';
+import { MaskVaultConnectionError } from '../src/core/exceptions';
 import * as process from 'process';
 
 describe('TestVaultBackends', () => {
@@ -7,6 +9,8 @@ describe('TestVaultBackends', () => {
 
     beforeEach(() => {
         originalEnv = { ...process.env };
+        resetVault();
+        resetKeyProvider();
     });
 
     afterEach(() => {
@@ -30,25 +34,33 @@ describe('TestVaultBackends', () => {
             const now = Math.floor(Date.now() / 1000);
             await vault.store("tok_1", "secret", 60, secretHash);
 
-            // Verify two sends in TransactWriteItems (one forward, one reverse)
-            // Wait, the way TransactWriteItemsCommand works in v3:
-            expect(mockClient.send).toHaveBeenCalledTimes(1); // TransactWriteItemsCommand is a single send
+            expect(mockClient.send).toHaveBeenCalledTimes(1);
             const firstCall = mockClient.send.mock.calls[0][0] as any;
             const input = firstCall.input;
             
-            expect(input.TransactItems[0].Put.Item.token.S).toBe("mask:tok_1");
-            expect(input.TransactItems[0].Put.Item.ciphertext.S).toBe("secret");
-            expect(Number(input.TransactItems[0].Put.Item.ttl.N)).toBeGreaterThanOrEqual(now + 60);
+            expect(input.TransactItems[0].Put.Item.token).toBe("mask:tok_1");
+            expect(input.TransactItems[0].Put.Item.ciphertext).toBe("secret");
+            expect(input.TransactItems[0].Put.Item.ttl).toBeGreaterThanOrEqual(now + 60);
 
-            expect(input.TransactItems[1].Put.Item.token.S).toBe(`mask-rev:${secretHash}`);
-            expect(input.TransactItems[1].Put.Item.ciphertext.S).toBe("tok_1");
+            expect(input.TransactItems[1].Put.Item.token).toBe(`mask-rev:${secretHash}`);
+            expect(input.TransactItems[1].Put.Item.ciphertext).toBe("tok_1");
+        });
+
+        test('test_store_raises_on_transaction_failure', async () => {
+            process.env.MASK_FAIL_STRATEGY = "open"; // Even in open mode, we expect failure for storage during encode
+            const vault = new DynamoDBVault();
+            const mockClient = {
+                send: jest.fn<any>().mockRejectedValue(new Error("ProvisionedThroughputExceededException") as never)
+            };
+            (vault as any)._client = mockClient;
+
+            await expect(vault.store("tok_fail", "data", 60, "hash")).rejects.toThrow(MaskVaultConnectionError);
         });
 
         test('test_retrieve_returns_val_and_handles_expiry', async () => {
             const vault = new DynamoDBVault();
             const now = Math.floor(Date.now() / 1000);
             
-            // 1. Success case
             const sendSpy = jest.fn<any>().mockImplementation(async (command: any) => {
                 if (command.constructor.name === 'GetCommand') {
                     if (command.input.Key.token === "mask:tok_2") {
@@ -68,7 +80,6 @@ describe('TestVaultBackends', () => {
             const res = await vault.retrieve("tok_2");
             expect(res).toBe("safe");
 
-            // 2. Expired case
             const staleHash = _hashPlaintext("stale");
             sendSpy.mockResolvedValueOnce({
                 Item: {
@@ -79,15 +90,12 @@ describe('TestVaultBackends', () => {
                 }
             } as never);
 
-            // We need to mock DeleteCommand too
             sendSpy.mockResolvedValue({});
 
             const resExpired = await vault.retrieve("tok_expiration");
             expect(resExpired).toBeNull();
             
-            // Check that delete was called for BOTH the token and the reverse mapping
-            const calls = sendSpy.mock.calls;
-            const deleteCalls = calls.filter((c: any) => c[0].constructor.name === 'DeleteCommand');
+            const deleteCalls = sendSpy.mock.calls.filter((c: any) => c[0].constructor.name === 'DeleteCommand');
             expect(deleteCalls.length).toBeGreaterThanOrEqual(2);
         });
     });

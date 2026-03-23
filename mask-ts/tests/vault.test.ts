@@ -9,25 +9,25 @@ describe('TestMemoryVault', () => {
     vault = new MemoryVault();
   });
 
-  test('test_store_and_retrieve', () => {
-    vault.store("tok1", "hello", 60);
-    expect(vault.retrieve("tok1")).toBe("hello");
+  test('test_store_and_retrieve', async () => {
+    await vault.store("tok1", "hello", 60);
+    expect(await vault.retrieve("tok1")).toBe("hello");
   });
 
-  test('test_missing_key_returns_none', () => {
-    expect(vault.retrieve("nope")).toBe(null);
+  test('test_missing_key_returns_none', async () => {
+    expect(await vault.retrieve("nope")).toBe(null);
   });
 
   test('test_expired_key_returns_none', async () => {
-    vault.store("tok2", "data", 0);
+    await vault.store("tok2", "data", 0);
     await new Promise(r => setTimeout(r, 50));
-    expect(vault.retrieve("tok2")).toBe(null);
+    expect(await vault.retrieve("tok2")).toBe(null);
   });
 
-  test('test_delete', () => {
-    vault.store("tok3", "val", 60);
-    vault.delete("tok3");
-    expect(vault.retrieve("tok3")).toBe(null);
+  test('test_delete', async () => {
+    await vault.store("tok3", "val", 60);
+    await vault.delete("tok3");
+    expect(await vault.retrieve("tok3")).toBe(null);
   });
 });
 

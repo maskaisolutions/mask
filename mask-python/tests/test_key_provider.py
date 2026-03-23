@@ -1,6 +1,7 @@
 """Tests for the pluggable KeyProvider abstraction."""
 
 import os
+import sys
 import pytest
 
 from mask_privacy.core.key_provider import (
@@ -52,15 +53,39 @@ def test_env_provider_falls_back_master_to_encryption(monkeypatch):
     assert provider.get_master_key() == "fallback-key"
 
 
-def test_stub_providers_raise_not_implemented():
+def test_kms_providers_functional(monkeypatch, mocker):
+    # Mock AWS SecretsManager
+    mock_sm = mocker.Mock()
+    mock_sm.get_secret_value.return_value = {"SecretString": "aws-key"}
+    mocker.patch("boto3.client", return_value=mock_sm)
+    
     aws = AwsKmsKeyProvider("alias/key")
-    with pytest.raises(NotImplementedError):
-        aws.get_encryption_key()
-        
+    assert aws.get_encryption_key() == "aws-key"
+    
+    # Mock Azure Key Vault (mock sys.modules since azure may not be installed)
+    mock_azure_module = mocker.Mock()
+    mock_identity_module = mocker.Mock()
+    mocker.patch.dict(sys.modules, {
+        "azure": mock_azure_module,
+        "azure.keyvault": mock_azure_module,
+        "azure.keyvault.secrets": mock_azure_module,
+        "azure.identity": mock_identity_module
+    })
+    
+    mock_client_inst = mocker.Mock()
+    mock_client_inst.get_secret.return_value = mocker.Mock(value="azure-key")
+    mock_azure_module.SecretClient.return_value = mock_client_inst
+    
     azure = AzureKeyVaultProvider("https://vault")
-    with pytest.raises(NotImplementedError):
-        azure.get_master_key()
-        
+    assert azure.get_encryption_key() == "azure-key"
+    
+    # Mock HashiCorp Vault
+    mock_hvac_module = mocker.Mock()
+    mocker.patch.dict(sys.modules, {"hvac": mock_hvac_module})
+    
+    mock_hvac_inst = mocker.Mock()
+    mock_hvac_inst.read.return_value = {"data": {"data": {"value": "hashi-key"}}}
+    mock_hvac_module.Client.return_value = mock_hvac_inst
+    
     hashi = HashiCorpVaultProvider("https://vault:8200")
-    with pytest.raises(NotImplementedError):
-        hashi.get_encryption_key()
+    assert hashi.get_encryption_key() == "hashi-key"

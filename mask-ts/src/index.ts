@@ -26,14 +26,20 @@ export {
 
 export {
     getScanner,
-    RemotePresidioScanner,
+    BaseScanner,
+    PresidioScanner,
 } from './core/scanner';
+
+export {
+    LocalTransformersScanner,
+} from './core/transformers_scanner';
 
 export {
     MaskError,
     MaskVaultConnectionError,
     MaskDecryptionError,
     MaskNLPTimeout,
+    MaskSecurityError,
 } from './core/exceptions';
 
 import { getScanner } from './core/scanner';

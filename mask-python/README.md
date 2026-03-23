@@ -49,7 +49,7 @@ The Data Plane is the open-source, transparent, auditable runtime execution laye
 *   **JIT Cryptography Engine:** The core pre-tool decryption and post-tool encryption hooks that intercept and mutate data in-flight.
 *   **Format-Preserving Tokenization Router:** Ensures downstream databases and strict schemas don't break when handed a token. Tokens look like real data; the real values are stored encrypted and retrieved via the vault.
 *   **Pluggable Distributed Vaults:** Support for enterprise-native caching layers (Redis, DynamoDB, Memcached) to ensure horizontally-scaled edge agents have synchronized access to detokenization mapping.
-*   **Local Audit Logger:** An asynchronous AuditLogger that buffers privacy events to a local SQLite database and emits structured JSON logs for SIEM ingestion.
+*   **Local Audit Logger:** An asynchronous AuditLogger that buffers privacy events in memory and emits structured JSON logs to stdout for SIEM ingestion.
 
 ---
 
@@ -97,6 +97,10 @@ Performance-sensitive deployments can now offload the ~500MB spaCy NLP model to 
 
 ### 7. Sub-string Detokenization
 Mask includes the ability to detokenize PII embedded within larger text blocks (like email bodies or chat messages). `detokenize_text()` uses high-performance regex to find and restore all tokens within a paragraph before they hit your tools.
+
+### 8. Performance Optimizations (Production-Ready)
+- **Persistent Scanner Pool**: The NLP scanner now utilizes a module-level `ThreadPoolExecutor` internally, eliminating thread-churn latency on each call.
+- **Probabilistic Vault Cleanup**: `MemoryVault` now uses a probabilistic $O(1)$ cleanup strategy (~1% frequency) to avoid $O(N)$ blocking scans in high-concurrency environments.
 
 ## Installation and Setup
 
@@ -153,11 +157,17 @@ export MASK_ENCRYPTION_KEY="..."
 export MASK_MASTER_KEY="..."
 ```
 
-For Enterprise Key Management, set a custom provider in code:
+#### 2. Pluggable Key Management (Enterprise KMS)
+For zero-trust environments, Mask supports a pluggable `BaseKeyProvider` architecture. You can inject a custom provider to fetch secrets dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault.
+
 ```python
 from mask_privacy.core.key_provider import set_key_provider, AwsKmsKeyProvider
-set_key_provider(AwsKmsKeyProvider(key_id="alias/mask"))
+set_key_provider(AwsKmsKeyProvider(key_id="alias/mask", region="us-east-1"))
 ```
+
+> [!IMPORTANT]
+> **Production Security (Fail-Shut)**:
+> All KMS stub providers are designed to **Fail-Shut**. If you attempt to use a stub provider that is not yet fully implemented, the SDK will raise a `NotImplementedError` instead of falling back to insecure defaults. This ensures that you never accidentally encrypt data with a weak or auto-generated key when you intended to use a KMS.
 
 #### 2. Select Scanner Type
 ```bash
@@ -178,6 +188,13 @@ export MASK_DYNAMODB_REGION=us-east-1
 # For Memcached:
 export MASK_MEMCACHED_HOST=localhost
 export MASK_MEMCACHED_PORT=11211
+
+#### 4. Security & Performance (Optional)
+# Enable strict mode to refuse startup without MASK_ENCRYPTION_KEY
+export MASK_STRICT_PROD=true
+
+# Configure NLP thread pool size (default: 4)
+export MASK_NLP_MAX_WORKERS=8
 ```
 
 For production and staging environments, `MASK_ENCRYPTION_KEY` **must** be set;
@@ -315,17 +332,13 @@ The SDK includes a thread-safe, asynchronous AuditLogger built-in (`mask_privacy
 
 As your agents encrypt and decrypt data, the logger buffers these privacy events (e.g., Action: Tokenized Email, Agent: SalesBot, TTL: 600s). **Raw PII is never logged.** 
 
-Audit events are stored locally in a SQLite database (`.mask_audit.db`) and flushed to stdout as structured JSON. Pipe them into your existing Datadog or Splunk agents to generate compliance reports for your SOC2, HIPAA, or PCI-DSS auditors proving that your LLM infrastructure properly isolates sensitive data.
+Audit events are buffered in memory and flushed periodically to stdout as structured JSON. Pipe these logs into your existing Datadog or Splunk agents to generate compliance reports for your SOC2, HIPAA, or PCI-DSS auditors proving that your LLM infrastructure properly isolates sensitive data.
 
-If your environment does not permit on-disk storage of audit events, you can
-disable the local SQLite buffer by setting:
+To prevent memory issues in high-volume environments, the buffer size can be capped:
 
 ```bash
-export MASK_DISABLE_AUDIT_DB=true
+export MASK_AUDIT_MAX_BUFFER_SIZE=5000
 ```
-
-In this mode, events are still emitted via the logger but never persisted to
-`.mask_audit.db` on disk.
 
 
 

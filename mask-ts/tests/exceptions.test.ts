@@ -3,7 +3,8 @@ import {
   MaskError, 
   MaskVaultConnectionError, 
   MaskDecryptionError, 
-  MaskNLPTimeout 
+  MaskNLPTimeout,
+  MaskSecurityError
 } from '../src/core/exceptions';
 import * as maskPrivacy from '../src/index';
 
@@ -25,6 +26,11 @@ describe('TestExceptionHierarchy', () => {
 
   test('test_nlp_timeout_inherits', () => {
     const err = new MaskNLPTimeout("test");
+    expect(err).toBeInstanceOf(MaskError);
+  });
+
+  test('test_security_error_inherits', () => {
+    const err = new MaskSecurityError("test");
     expect(err).toBeInstanceOf(MaskError);
   });
 });
@@ -71,5 +77,6 @@ describe('TestExceptionsExportedFromPackage', () => {
     expect(maskPrivacy).toHaveProperty("MaskVaultConnectionError");
     expect(maskPrivacy).toHaveProperty("MaskDecryptionError");
     expect(maskPrivacy).toHaveProperty("MaskNLPTimeout");
+    expect(maskPrivacy).toHaveProperty("MaskSecurityError");
   });
 });

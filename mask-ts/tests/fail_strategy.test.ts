@@ -25,16 +25,15 @@ describe('TestFailStrategy', () => {
             process.env.MASK_REDIS_URL = DUMMY_URL;
             process.env.MASK_VAULT_TYPE = "redis";
             
-            // In ioredis, connection error happens during operation or on 'error' event.
-            // Our logic in RedisVault constructor doesn't await connection.
-            // But we can check if it throws during a store operation.
             const vault = new RedisVault();
-            // Mock redis.set to fail
-            (vault as any)._redis = {
-                set: jest.fn().mockRejectedValue(new Error("Connection refused") as never),
-                get: jest.fn().mockRejectedValue(new Error("Connection refused") as never),
-                quit: jest.fn().mockResolvedValue("OK" as never)
+            const mockRedis = {
+                pipeline: jest.fn<any>().mockReturnValue({
+                    set: jest.fn<any>().mockReturnThis(),
+                    exec: jest.fn<any>().mockRejectedValue(new Error("Connection refused"))
+                }),
+                quit: jest.fn<any>().mockResolvedValue("OK")
             };
+            (vault as any)._client = mockRedis;
 
             await expect(vault.store("t", "c", 60, "h")).rejects.toThrow(MaskVaultConnectionError);
         });
@@ -43,9 +42,8 @@ describe('TestFailStrategy', () => {
             process.env.MASK_FAIL_STRATEGY = "closed";
             
             const vault = new DynamoDBVault();
-            // Mock client.send to fail for TransactWriteItemsCommand
             (vault as any)._client = {
-                send: jest.fn().mockRejectedValue(new Error("Transaction cancelled") as never)
+                send: jest.fn<any>().mockRejectedValue(new Error("Transaction cancelled"))
             };
 
             await expect(vault.store("tok123", "cipher", 600, "abc123")).rejects.toThrow(MaskVaultConnectionError);
@@ -53,25 +51,32 @@ describe('TestFailStrategy', () => {
     });
 
     describe('TestFailStrategyOpen', () => {
-        test('test_dynamodb_atomic_write_falls_back_when_open', async () => {
+        test('test_dynamodb_atomic_write_raises_even_when_open', async () => {
+            // Updated behavior: DynamoDB failures always raise to prevent silent data loss
             process.env.MASK_FAIL_STRATEGY = "open";
             
             const vault = new DynamoDBVault();
-            const sendSpy = jest.fn().mockImplementation((command: any) => {
-                // Fail the transaction command
-                if (command.constructor.name === 'TransactWriteCommand') {
-                    return Promise.reject(new Error("Transaction cancelled"));
-                }
-                // Succeed for others (PutItemCommand if fallback used)
-                return Promise.resolve({});
-            });
-            (vault as any)._client = { send: sendSpy };
+            (vault as any)._client = {
+                send: jest.fn<any>().mockRejectedValue(new Error("Transaction cancelled"))
+            };
 
-            // Should NOT throw
-            await vault.store("tok123", "cipher", 600, "abc123");
-            
-            // Check that it tried to fall back (multiple sends)
-            expect(sendSpy.mock.calls.length).toBeGreaterThan(1);
+            // Should THROW because we don't want to lose the primary record if the atomic write fails
+            await expect(vault.store("tok123", "cipher", 600, "abc123")).rejects.toThrow(MaskVaultConnectionError);
+        });
+
+        test('test_redis_vault_returns_null_when_open', async () => {
+           process.env.MASK_FAIL_STRATEGY = "open";
+           const vault = new RedisVault();
+           const mockRedis = {
+                pipeline: jest.fn<any>().mockReturnValue({
+                    set: jest.fn<any>().mockReturnThis(),
+                    exec: jest.fn<any>().mockRejectedValue(new Error("Connection failed"))
+                })
+           };
+           (vault as any)._client = mockRedis;
+
+           // Calling store should resolve (silent failure)
+           await expect(vault.store("t", "c", 60, "h")).resolves.toBeUndefined();
         });
     });
 

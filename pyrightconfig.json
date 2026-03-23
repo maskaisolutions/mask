@@ -1,0 +1,15 @@
+{
+  "venvPath": "C:\\Users\\Smillington\\mask",
+  "venv": ".venv",
+  "reportMissingImports": true,
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.10",
+  "executionEnvironments": [
+    {
+      "root": "mask-python",
+      "extraPaths": [
+        "mask-python"
+      ]
+    }
+  ]
+}

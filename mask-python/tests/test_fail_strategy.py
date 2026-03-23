@@ -13,64 +13,54 @@ class TestFailStrategyClosed:
     def test_redis_vault_raises_on_connection_failure(self):
         """RedisVault.__init__ should raise MaskVaultConnectionError when Redis is unreachable."""
         with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "closed"}):
-            with pytest.raises(MaskVaultConnectionError):
-                from mask_privacy.core.vault import RedisVault
-                # Point at a port that is definitely not running Redis
-                with patch.dict(os.environ, {"MASK_REDIS_URL": "redis://localhost:59999/0"}):
+            from mask_privacy.core.vault import RedisVault
+            with patch("redis.Redis") as mock_redis:
+                mock_redis.from_url.return_value.ping.side_effect = Exception("Connection refused")
+                with pytest.raises(MaskVaultConnectionError):
                     RedisVault()
 
     def test_dynamodb_atomic_write_raises_when_closed(self):
-        """DynamoDB transact_write_items failure should raise when strategy is closed."""
+        """DynamoDB transact_write_items failure should raise."""
         with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "closed"}):
             from mask_privacy.core.vault import DynamoDBVault
-
-            # Create a mock DynamoDB vault
-            with patch("boto3.resource") as mock_resource, \
-                 patch("boto3.client") as mock_client:
-                mock_table = MagicMock()
-                mock_resource.return_value.Table.return_value = mock_table
-
-                vault = DynamoDBVault.__new__(DynamoDBVault)
-                vault._table_name = "test-table"
-                vault._table = mock_table
-                vault._client = mock_resource.return_value
-
-                # Simulate transact_write_items failure
-                mock_ddb_client = MagicMock()
-                mock_ddb_client.transact_write_items.side_effect = Exception("Transaction cancelled")
-                mock_client.return_value = mock_ddb_client
-
+            with patch("boto3.resource") as mock_resource:
+                mock_db = MagicMock()
+                mock_resource.return_value = mock_db
+                # The client is usually self._dynamodb.meta.client
+                mock_db.meta.client.transact_write_items.side_effect = Exception("Transaction failed")
+                
+                vault = DynamoDBVault()
                 with pytest.raises(MaskVaultConnectionError):
                     vault.store("tok123", "cipher", 600, pt_hash="abc123")
 
 
 class TestFailStrategyOpen:
-    """When MASK_FAIL_STRATEGY=open (default), vault errors should be graceful."""
+    """When MASK_FAIL_STRATEGY=open (default), vault errors should be graceful, except for DynamoDB."""
 
-    def test_dynamodb_atomic_write_falls_back_when_open(self):
-        """DynamoDB transact_write_items failure should fall back to put_item when open."""
+    def test_dynamodb_atomic_write_raises_even_when_open(self):
+        """DynamoDB transact_write_items failure should ALWAYS raise to prevent data loss."""
         with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "open"}):
             from mask_privacy.core.vault import DynamoDBVault
+            with patch("boto3.resource") as mock_resource:
+                mock_db = MagicMock()
+                mock_resource.return_value = mock_db
+                mock_db.meta.client.transact_write_items.side_effect = Exception("Transaction failed")
+                
+                vault = DynamoDBVault()
+                with pytest.raises(MaskVaultConnectionError):
+                    vault.store("tok123", "cipher", 600, pt_hash="abc123")
 
-            with patch("boto3.resource") as mock_resource, \
-                 patch("boto3.client") as mock_client:
-                mock_table = MagicMock()
-                mock_resource.return_value.Table.return_value = mock_table
-
-                vault = DynamoDBVault.__new__(DynamoDBVault)
-                vault._table_name = "test-table"
-                vault._table = mock_table
-                vault._client = mock_resource.return_value
-
-                mock_ddb_client = MagicMock()
-                mock_ddb_client.transact_write_items.side_effect = Exception("Transaction cancelled")
-                mock_client.return_value = mock_ddb_client
-
-                # Should NOT raise — falls back to non-atomic put_item
+    def test_redis_store_graceful_when_open(self):
+        """Redis store failure should NOT raise when open."""
+        with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "open"}):
+            from mask_privacy.core.vault import RedisVault
+            with patch("redis.from_url") as mock_from_url:
+                mock_db = mock_from_url.return_value
+                mock_db.pipeline.return_value.execute.side_effect = Exception("Write failed")
+                
+                vault = RedisVault()
+                # Should NOT raise
                 vault.store("tok123", "cipher", 600, pt_hash="abc123")
-
-                # Verify put_item was called as fallback
-                assert mock_table.put_item.call_count == 2  # forward + reverse
 
 
 class TestFailStrategyDefault:
@@ -79,5 +69,6 @@ class TestFailStrategyDefault:
     def test_default_is_open(self):
         from mask_privacy.core.vault import _get_fail_strategy
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("MASK_FAIL_STRATEGY", None)
+            if "MASK_FAIL_STRATEGY" in os.environ:
+                del os.environ["MASK_FAIL_STRATEGY"]
             assert _get_fail_strategy() == "open"

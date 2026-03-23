@@ -18,14 +18,26 @@ import { MaskDecryptionError } from './exceptions';
 export class CryptoEngine {
   private static _instance: CryptoEngine | null = null;
   private _fernet: any;
+  private _indexSecret: Buffer | null = null;
 
-  private constructor() {
-    this._init();
-  }
+  private constructor() {}
 
-  public static getInstance(): CryptoEngine {
+  /** 
+   * Return the singleton instance, initialising it if necessary.
+   * This is asynchronous because key providers (KMS, etc.) might be async.
+   */
+  public static async getInstanceAsync(): Promise<CryptoEngine> {
     if (this._instance === null) {
       this._instance = new CryptoEngine();
+      await this._instance._init();
+    }
+    return this._instance;
+  }
+
+  /** Legacy synchronous accessor — will throw if not already initialised. */
+  public static getInstance(): CryptoEngine {
+    if (this._instance === null) {
+      throw new Error("CryptoEngine not initialised. Call getInstanceAsync() first.");
     }
     return this._instance;
   }
@@ -35,7 +47,7 @@ export class CryptoEngine {
     this._instance = null;
   }
 
-  private _init(): void {
+  private async _init(): Promise<void> {
     /**
      * Initialize the underlying Fernet engine.
      *
@@ -43,9 +55,17 @@ export class CryptoEngine {
      * If no key is available, a throwaway key is auto-generated for
      * local/test/demo use.
      */
-    const keyFromProvider = getKeyProvider().getEncryptionKey();
+    const provider = getKeyProvider();
+    const keyFromProvider = await provider.getEncryptionKey();
+    
     let key: string;
     if (!keyFromProvider) {
+      if (process.env.MASK_STRICT_PROD === 'true') {
+        throw new Error(
+          'MASK_STRICT_PROD is enabled but MASK_ENCRYPTION_KEY is not set. ' +
+          'Refusing to start with an auto-generated key in production mode.'
+        );
+      }
       key = cryptoNode.randomBytes(32).toString('base64');
       process.env.MASK_ENCRYPTION_KEY = key;
       console.warn(
@@ -57,24 +77,34 @@ export class CryptoEngine {
 
     try {
       // fernet Secret expects a base64 encoded string
-      const secret = new fernet.Secret(key);
-      this._fernet = secret;
+      this._fernet = new fernet.Secret(key);
     } catch (e) {
       throw new Error(
         "Invalid MASK_ENCRYPTION_KEY. Must be a valid url-safe base64-encoded " +
         "Fernet key."
       );
     }
+
+    // Derive a separate secret for blind indexing (HMAC-SHA256)
+    // We derive it from the master encryption key so we don't need a 3rd env var.
+    const masterKey = await provider.getMasterKey() || key;
+    this._indexSecret = cryptoNode.createHmac('sha256', masterKey).update("mask-blind-index").digest();
+  }
+
+  /** Return the secret used for HMAC-based blind indexing. */
+  public async getIndexSecret(): Promise<Buffer> {
+    if (!this._indexSecret) {
+      await this._init();
+    }
+    return this._indexSecret!;
   }
 
   public encrypt(plaintext: string): string {
     /** Encrypt plaintext into a url-safe base64 string. */
     const token = new fernet.Token({
       secret: this._fernet,
-      time: Date.now(),
-      iv: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] // Placeholder if needed, but fernet generates its own
+      iv: Array.from(cryptoNode.randomBytes(16)) // use real randomness
     });
-    // The fernet npm package encode returns a string
     return token.encode(plaintext);
   }
 
@@ -88,13 +118,18 @@ export class CryptoEngine {
       });
       return token.decode();
     } catch (e) {
-      console.error("Failed to decrypt vault payload. Check your MASK_ENCRYPTION_KEY.");
+      console.error("Failed to decrypt vault payload. Check your MASK_ENCRYPTION_KEY. Inner error:", e);
       throw new MaskDecryptionError("Decryption failed");
     }
   }
 }
 
-/** Return the configured crypto engine singleton. */
+/** Return the configured crypto engine singleton (Legacy sync wrapper). */
 export function getCryptoEngine(): CryptoEngine {
   return CryptoEngine.getInstance();
+}
+
+/** Async-friendly accessor for the crypto engine. */
+export async function getCryptoEngineAsync(): Promise<CryptoEngine> {
+  return await CryptoEngine.getInstanceAsync();
 }

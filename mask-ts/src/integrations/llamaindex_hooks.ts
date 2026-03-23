@@ -6,6 +6,9 @@
  */
 
 import { deepDecode, deepEncodePII } from '../core/utils';
+import { getLogger } from '../telemetry/audit_logger';
+
+const logger = getLogger('mask.integrations.llamaindex');
 
 /**
  * Tool Wrapper — works with any callable.
@@ -33,14 +36,19 @@ export class MaskToolWrapper {
 
 /**
  * LlamaIndex callback handler.
+ * Matches the functional Python implementation.
  */
 export async function getMaskCallbackHandler() {
     try {
         const { BaseCallbackHandler } = require("llamaindex");
-        // LlamaIndex TS callback API might differ, providing a stub-like implementation
-        // that follows the expected pattern if it exists.
         return class MaskCallbackHandler extends BaseCallbackHandler {
-            // Implementation depends on llamaindex TS version
+            async onEvent(eventType: string, payload: any, eventId?: string): Promise<void> {
+                if (eventType === 'function_call' && payload) {
+                    logger.info(`[llamaindex callback] decoding payload for event ${eventId}`);
+                    const decoded = await deepDecode(payload);
+                    if (typeof payload === 'object') Object.assign(payload, decoded);
+                }
+            }
         };
     } catch (e) {
         return class MaskCallbackHandler {
@@ -62,6 +70,7 @@ export function maskLlamaIndexHooks(): void {
     const originalCall = BaseTool.prototype.call;
     if (!originalCall) return;
 
+
     BaseTool.prototype.call = async function(this: any, ...args: any[]) {
       // 1. Detokenize inputs
       const decodedArgs = await Promise.all(args.map(a => deepDecode(a)));
@@ -73,8 +82,8 @@ export function maskLlamaIndexHooks(): void {
       }
       return result;
     };
-    console.info("[llamaindex-magic] active: wrapping BaseTool.prototype.call");
+    logger.info("[llamaindex-magic] active: wrapping BaseTool.prototype.call");
   } catch (e) {
-    console.warn("llamaindex not installed; maskLlamaIndexHooks will have no effect.");
+    logger.warn("llamaindex not installed; maskLlamaIndexHooks will have no effect.");
   }
 }

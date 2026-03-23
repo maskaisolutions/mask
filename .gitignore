@@ -6,9 +6,21 @@ dist/
 wheels/
 *.egg-info
 
+# JavaScript / Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.tsbuildinfo
+
 # Virtual environments
 .venv
 .env
 
 # Local Databases
 .mask_audit.db
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

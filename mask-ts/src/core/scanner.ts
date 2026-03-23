@@ -7,14 +7,13 @@
  *
  * Detection Architecture (Waterfall):
  *   Tier 1 — Deterministic: Regex + Checksum  (fast, provable, auditable)
- *   Tier 2 — Probabilistic: Presidio NLP       (slow, fuzzy, catches names)
+ *   Tier 2 — Probabilistic: Local NLP via Transformers (catches names/orgs)
  */
 
 import * as process from 'process';
 import { encode } from './vault';
-import { looksLikeToken } from './fpe';
+import { looksLikeToken } from './fpe_utils';
 import { MaskNLPTimeout } from './exceptions';
-import axios from 'axios';
 
 /** Regex patterns for Tier 1 deterministic detection */
 export const REGEX_PATTERNS: Record<string, RegExp> = {
@@ -34,7 +33,7 @@ export const CONTEXT_KEYWORDS = new Set([
   "iban", "bank", "email", "pii", "personal info",
 ]);
 
-export class PresidioScanner {
+export class BaseScanner {
   protected _supportedEntities: string[];
 
   constructor() {
@@ -94,10 +93,10 @@ export class PresidioScanner {
         if (aggressive || boostEntities.has(entityType.toLowerCase().replace(/_/g, " "))) {
           confidence = 1.0;
         }
-        if (entityType === "CREDIT_CARD" && PresidioScanner._luhnChecksum(match[0])) {
+        if (entityType === "CREDIT_CARD" && BaseScanner._luhnChecksum(match[0])) {
           confidence = Math.max(confidence, 0.99);
         }
-        if (entityType === "US_ROUTING_NUMBER" && !PresidioScanner._abaChecksum(match[0])) {
+        if (entityType === "US_ROUTING_NUMBER" && !BaseScanner._abaChecksum(match[0])) {
           continue;
         }
         allMatches.push({
@@ -148,9 +147,8 @@ export class PresidioScanner {
     confidenceThreshold: number,
   ): Promise<[string, any[]]> {
     /**
-     * In the base PresidioScanner for TS, we treat Tier 2 as a NO-OP or 
-     * a call to the RemoteScanner if configured, as local NLP (spaCy) 
-     * is not recommended for Node.js.
+     * Base implementation is a no-op. Override in LocalTransformersScanner
+     * to enable NLP-based detection.
      */
     return [text, []];
   }
@@ -229,80 +227,24 @@ export class PresidioScanner {
   }
 }
 
-/**
- * Scanner that calls a remote Presidio Analyzer endpoint.
- */
-export class RemotePresidioScanner extends PresidioScanner {
-  private endpointUrl: string;
-
-  constructor(endpointUrl: string) {
-    super();
-    this.endpointUrl = endpointUrl;
-    console.info(`Using RemotePresidioScanner at ${endpointUrl}`);
-  }
-
-  protected async _tier2Nlp(
-    text: string,
-    encodeFn: (val: string) => Promise<string>,
-    boostEntities: Set<string>,
-    aggressive: boolean,
-    confidenceThreshold: number,
-  ): Promise<[string, any[]]> {
-    let entities: any[] = [];
-    try {
-      const timeout = parseInt(process.env.MASK_NLP_TIMEOUT_SECONDS || "60") * 1000;
-      const resp = await axios.post(
-        this.endpointUrl,
-        { text, language: "en" },
-        { timeout }
-      );
-      const results = resp.data;
-
-      let maskedText = text;
-      // Sort by start descending
-      const sortedResults = [...results].sort((a, b) => b.start - a.start);
-      for (const r of sortedResults) {
-        let confidence = r.score || 0.7;
-        if (aggressive || boostEntities.has(r.entity_type.toLowerCase().replace(/_/g, " "))) {
-          confidence = Math.min(1.0, confidence + 0.2);
-        }
-
-        const val = text.slice(r.start, r.end);
-        if (confidence >= confidenceThreshold && !looksLikeToken(val)) {
-          const token = await encodeFn(val);
-          maskedText = maskedText.slice(0, r.start) + token + maskedText.slice(r.end);
-          entities.push({
-            type: r.entity_type,
-            value: val,
-            method: "nlp-remote",
-            confidence: confidence,
-            masked_value: token,
-          });
-        }
-      }
-      return [maskedText, entities];
-    } catch (e) {
-      if (axios.isAxiosError(e) && e.code === 'ECONNABORTED') {
-          throw new MaskNLPTimeout(`Remote Presidio analysis exceeded timeout`);
-      }
-      console.error(`Remote NLP scan failed: ${e}`);
-      return [text, []];
-    }
-  }
-}
+/** @deprecated Use BaseScanner instead. Kept for backwards compatibility. */
+export const PresidioScanner = BaseScanner;
 
 // Singleton
-let scannerInstance: PresidioScanner | null = null;
+let scannerInstance: BaseScanner | null = null;
 
-export function getScanner(): PresidioScanner {
+export function getScanner(): BaseScanner {
   if (scannerInstance === null) {
-    const scannerType = (process.env.MASK_SCANNER_TYPE || "local").toLowerCase();
-    if (scannerType === "remote") {
-      const url = process.env.MASK_SCANNER_URL || "http://localhost:5001/analyze";
-      scannerInstance = new RemotePresidioScanner(url);
+    const scannerType = process.env.MASK_SCANNER_TYPE?.toLowerCase() || 'local';
+    
+    if (scannerType === 'remote') {
+      const { RemoteScanner } = require('./remote_scanner');
+      scannerInstance = new RemoteScanner();
     } else {
-      scannerInstance = new PresidioScanner();
+      // Use the local Transformers-based scanner by default for full NLP support
+      const { LocalTransformersScanner } = require('./transformers_scanner');
+      scannerInstance = new LocalTransformersScanner();
     }
   }
-  return scannerInstance;
+  return scannerInstance as BaseScanner;
 }

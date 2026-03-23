@@ -346,6 +346,57 @@ Restore from a snapshot.
 matcher.restore(snapshot);
 ```
 
+#### Read-Only Access
+
+##### `readOnly()`
+
+Returns a **live, read-only proxy** of the matcher. All query and inspection methods work normally, but any attempt to call a state-mutating method (`push`, `pop`, `reset`, `updateCurrent`, `restore`) or to write/delete a property throws a `TypeError`.
+
+This is the recommended way to share the matcher with external consumers — plugins, callbacks, event handlers — that only need to inspect the current path without being able to corrupt parser state.
+
+```javascript
+const ro = matcher.readOnly();
+```
+
+**What works on the read-only view:**
+
+```javascript
+ro.matches(expr)          // ✓ pattern matching
+ro.getCurrentTag()        // ✓ current tag name
+ro.getCurrentNamespace()  // ✓ current namespace
+ro.getAttrValue("id")     // ✓ attribute value
+ro.hasAttr("id")          // ✓ attribute presence check
+ro.getPosition()          // ✓ sibling position
+ro.getCounter()           // ✓ occurrence counter
+ro.getDepth()             // ✓ path depth
+ro.toString()             // ✓ path as string
+ro.toArray()              // ✓ path as array
+ro.snapshot()             // ✓ snapshot (can be used to restore the real matcher)
+```
+
+**What throws a `TypeError`:**
+
+```javascript
+ro.push("child", {})      // ✗ TypeError: Cannot call 'push' on a read-only Matcher
+ro.pop()                  // ✗ TypeError: Cannot call 'pop' on a read-only Matcher
+ro.reset()                // ✗ TypeError: Cannot call 'reset' on a read-only Matcher
+ro.updateCurrent({})      // ✗ TypeError: Cannot call 'updateCurrent' on a read-only Matcher
+ro.restore(snapshot)      // ✗ TypeError: Cannot call 'restore' on a read-only Matcher
+ro.separator = '/'        // ✗ TypeError: Cannot set property on a read-only Matcher
+```
+
+**Important:** The read-only view is **live** — it always reflects the current state of the underlying matcher. If you need a frozen-in-time copy instead, use `snapshot()`.
+
+```javascript
+const matcher = new Matcher();
+const ro = matcher.readOnly();
+
+matcher.push("root");
+ro.getDepth();    // 1 — immediately reflects the push
+matcher.push("users");
+ro.getDepth();    // 2 — still live
+```
+
 ## 💡 Usage Examples
 
 ### Example 1: XML Parser with stopNodes
@@ -481,7 +532,53 @@ const expr = new Expression("root.item:first");
 console.log(matcher.matches(expr)); // false (counter=1, not 0)
 ```
 
-### Example 7: Namespace Support (XML/SOAP)
+### Example 8: Passing a Read-Only Matcher to External Consumers
+
+When passing the matcher into callbacks, plugins, or other code you don't control, use `readOnly()` to prevent accidental state corruption.
+
+```javascript
+import { Expression, Matcher } from 'path-expression-matcher';
+
+const matcher = new Matcher();
+
+const adminExpr = new Expression("..user[type=admin]");
+
+function parseTag(tagName, attrs, onTag) {
+  matcher.push(tagName, attrs);
+
+  // Pass a read-only view — consumer can inspect but not mutate
+  onTag(matcher.readOnly());
+
+  matcher.pop();
+}
+
+// Safe consumer — can only read
+function myPlugin(ro) {
+  if (ro.matches(adminExpr)) {
+    console.log("Admin at path:", ro.toString());
+    console.log("Depth:", ro.getDepth());
+    console.log("ID:", ro.getAttrValue("id"));
+  }
+}
+
+// ro.push(...) or ro.reset() here would throw TypeError,
+// so the parser's state is always safe.
+parseTag("user", { id: "1", type: "admin" }, myPlugin);
+```
+
+**Combining with `snapshot()`:** A snapshot taken via the read-only view can still be used to restore the real matcher.
+
+```javascript
+const matcher = new Matcher();
+matcher.push("root");
+matcher.push("users");
+
+const ro = matcher.readOnly();
+const snap = ro.snapshot();       // ✓ snapshot works on read-only view
+
+matcher.push("user");             // continue parsing...
+matcher.restore(snap);            // restore to "root.users" using the snapshot
+```
 
 ```javascript
 const matcher = new Matcher();
@@ -613,18 +710,6 @@ const parser = new XMLParser({
   }
 });
 ```
-
-## 🧪 Testing
-
-```bash
-npm test
-```
-
-All 77 tests covering:
-- Pattern parsing (exact, wildcards, attributes, position)
-- Path tracking (push, pop, update)
-- Pattern matching (all combinations)
-- Edge cases and error conditions
 
 ## 📄 License
 

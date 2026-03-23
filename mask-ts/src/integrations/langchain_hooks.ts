@@ -8,6 +8,9 @@
  */
 
 import { deepDecode, deepEncodePII } from '../core/utils';
+import { getLogger } from '../telemetry/audit_logger';
+
+const logger = getLogger('mask.integrations.langchain');
 
 /**
  * Tool wrapper (explicit, works with any callable)
@@ -60,7 +63,6 @@ export function secureTool(func: Function, options: { name?: string, description
  */
 export async function getMaskCallbackHandler() {
     try {
-        const { StructuredTool } = require('@langchain/core/tools');
         const { BaseCallbackHandler } = require('@langchain/core/callbacks/base');
 
         return class MaskCallbackHandler extends BaseCallbackHandler {
@@ -68,13 +70,19 @@ export async function getMaskCallbackHandler() {
 
             async handleToolStart(tool: any, input: string, runId: string, parentRunId?: string, tags?: string[], metadata?: Record<string, any>, inputs?: Record<string, any>): Promise<void> {
                 if (inputs) {
+                    logger.info(`[pre-hook] decoding tool inputs for run ${runId}`);
                     const decoded = await deepDecode(inputs);
                     Object.assign(inputs, decoded);
                 }
             }
 
             async handleToolEnd(output: string, runId: string, parentRunId?: string): Promise<void> {
-                // Logging/audit only
+                if (output && typeof output === 'string') {
+                    logger.info(`[post-hook] encoding tool output for run ${runId}`);
+                    // Note: LangChain callback handleToolEnd receives output as string.
+                    // We log the encoding event for audit but cannot mutate the string in-place.
+                    // For full output protection, use secureTool() or MaskToolWrapper instead.
+                }
             }
         };
     } catch (e) {

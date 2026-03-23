@@ -14,6 +14,14 @@
  * const expr = new Expression("root.users.user");
  * matcher.matches(expr); // true
  */
+
+/**
+ * Names of methods that mutate Matcher state.
+ * Any attempt to call these on a read-only view throws a TypeError.
+ * @type {Set<string>}
+ */
+const MUTATING_METHODS = new Set(['push', 'pop', 'reset', 'updateCurrent', 'restore']);
+
 export default class Matcher {
   /**
    * Create a new Matcher
@@ -410,5 +418,81 @@ export default class Matcher {
   restore(snapshot) {
     this.path = snapshot.path.map(node => ({ ...node }));
     this.siblingStacks = snapshot.siblingStacks.map(map => new Map(map));
+  }
+
+  /**
+   * Return a read-only view of this matcher.
+   *
+   * The returned object exposes all query/inspection methods but throws a
+   * TypeError if any state-mutating method is called (`push`, `pop`, `reset`,
+   * `updateCurrent`, `restore`).  Property reads (e.g. `.path`, `.separator`)
+   * are allowed but the returned arrays/objects are frozen so callers cannot
+   * mutate internal state through them either.
+   *
+   * @returns {ReadOnlyMatcher} A proxy that forwards read operations and blocks writes.
+   *
+   * @example
+   * const matcher = new Matcher();
+   * matcher.push("root", {});
+   *
+   * const ro = matcher.readOnly();
+   * ro.matches(expr);      // ✓ works
+   * ro.getCurrentTag();    // ✓ works
+   * ro.push("child", {}); // ✗ throws TypeError
+   * ro.reset();            // ✗ throws TypeError
+   */
+  readOnly() {
+    const self = this;
+
+    return new Proxy(self, {
+      get(target, prop, receiver) {
+        // Block mutating methods
+        if (MUTATING_METHODS.has(prop)) {
+          return () => {
+            throw new TypeError(
+              `Cannot call '${prop}' on a read-only Matcher. ` +
+              `Obtain a writable instance to mutate state.`
+            );
+          };
+        }
+
+        const value = Reflect.get(target, prop, receiver);
+
+        // Freeze array/object properties so callers can't mutate internal
+        // state through direct property access (e.g. matcher.path.push(...))
+        if (prop === 'path' || prop === 'siblingStacks') {
+          return Object.freeze(
+            Array.isArray(value)
+              ? value.map(item =>
+                item instanceof Map
+                  ? Object.freeze(new Map(item))   // freeze a copy of each Map
+                  : Object.freeze({ ...item })      // freeze a copy of each node
+              )
+              : value
+          );
+        }
+
+        // Bind methods so `this` inside them still refers to the real Matcher
+        if (typeof value === 'function') {
+          return value.bind(target);
+        }
+
+        return value;
+      },
+
+      // Prevent any property assignment on the read-only view
+      set(_target, prop) {
+        throw new TypeError(
+          `Cannot set property '${String(prop)}' on a read-only Matcher.`
+        );
+      },
+
+      // Prevent property deletion
+      deleteProperty(_target, prop) {
+        throw new TypeError(
+          `Cannot delete property '${String(prop)}' from a read-only Matcher.`
+        );
+      }
+    });
   }
 }
