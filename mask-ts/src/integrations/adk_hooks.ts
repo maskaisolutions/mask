@@ -17,13 +17,14 @@ const logger = getLogger('mask.integrations.adk');
 export async function decryptBeforeTool(
     tool: any,
     args: Record<string, any>,
-    toolContext: any
+    toolContext: any,
+    client?: any
 ): Promise<null> {
     const agentName = toolContext?.agent_name || "unknown";
     const toolName = tool?.name || String(tool);
     logger.info(`[pre-hook] decrypting for ${agentName} → ${toolName}`);
 
-    const decodedArgs = await deepDecode(args);
+    const decodedArgs = await deepDecode(args, client);
     // Mutate in place (ADK expects args dict to be modified)
     Object.assign(args, decodedArgs);
     return null;
@@ -36,19 +37,20 @@ export async function encryptAfterTool(
     tool: any,
     args: Record<string, any>,
     toolContext: any,
-    toolResponse: any
+    toolResponse: any,
+    client?: any
 ): Promise<any> {
     const agentName = toolContext?.agent_name || "unknown";
     const toolName = tool?.name || String(tool);
     logger.info(`[post-hook] encrypting for ${agentName} → ${toolName}`);
 
     // Encrypt any plaintext emails that leaked into the args
-    const encodedArgs = await deepEncodePII(args);
+    const encodedArgs = await deepEncodePII(args, client);
     Object.assign(args, encodedArgs);
 
     // Encrypt tool_response if it is a string, dict, or list
     if (typeof toolResponse === 'string' || typeof toolResponse === 'object') {
-        const encodedResp = await deepEncodePII(toolResponse);
+        const encodedResp = await deepEncodePII(toolResponse, client);
         if (typeof toolResponse === 'object' && !Array.isArray(toolResponse) && typeof encodedResp === 'object') {
             Object.assign(toolResponse, encodedResp);
         }

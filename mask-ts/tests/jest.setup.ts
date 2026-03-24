@@ -18,9 +18,10 @@ jest.mock('@huggingface/transformers', () => ({
 import * as crypto from 'crypto';
 import { getAuditLogger } from '../src/telemetry/audit_logger';
 
-process.env.MASK_ALLOW_INSECURE_KEYS = "true";
+
+process.env.MASK_DEV_MODE = "true";
 if (!process.env.MASK_ENCRYPTION_KEY) {
-  // Generate a stable-ish but unique-per-test-run key
+  // Generate a unique-per-test-run key (AES-256-GCM uses SHA-256 derivation)
   process.env.MASK_ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
 }
 

@@ -10,6 +10,7 @@
  */
 
 import * as process from 'process';
+import { looksLikeToken } from '../core/fpe_utils';
 
 // ---------------------------------------------------------------------------
 // Internal SDK Logger (replaces scattered console.info calls)
@@ -73,9 +74,33 @@ function _makeEvent(
         tool,
     };
     if (extra) {
-        Object.assign(event, extra);
+        // Sanitize extra fields to prevent PII leakage into audit logs
+        Object.assign(event, _deepMask(extra));
     }
     return event;
+}
+
+/**
+ * Recursively redact any strings in an object that do not look like Mask tokens.
+ * This ensures that if a developer accidentally passes cleartext PII in the
+ * 'extra' fields, it is redacted before reaching the audit trail.
+ */
+function _deepMask(obj: any): any {
+    if (obj === null || obj === undefined) return obj;
+    if (typeof obj === 'string') {
+        return looksLikeToken(obj) ? obj : "[REDACTED]";
+    }
+    if (typeof obj !== 'object') return obj;
+
+    if (Array.isArray(obj)) {
+        return obj.map(v => _deepMask(v));
+    }
+
+    const masked: Record<string, any> = {};
+    for (const [k, v] of Object.entries(obj)) {
+        masked[k] = _deepMask(v);
+    }
+    return masked;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,11 +117,13 @@ export class AuditLogger {
     private _isFlushing: boolean = false;
     private _buffer: Record<string, any>[] = [];
     private _maxBufferSize: number;
+    private _strictMode: boolean;
     private _bufferFullWarned: boolean = false;
     private _shutdownRegistered: boolean = false;
 
     private constructor() {
         this._maxBufferSize = parseInt(process.env.MASK_AUDIT_MAX_BUFFER_SIZE || "5000");
+        this._strictMode = process.env.MASK_AUDIT_LOG_STRICT === 'true';
     }
 
     public static getInstance(): AuditLogger {
@@ -120,12 +147,12 @@ export class AuditLogger {
         if (this._buffer.length >= this._maxBufferSize) {
             if (!this._bufferFullWarned) {
                 _logger.warn(
-                    `AuditLogger buffer full (max=${this._maxBufferSize}). Dropping newest events to prevent OOM.`
+                    `AuditLogger buffer full (max=${this._maxBufferSize}). Performing emergency sync-flush to prevent data loss.`
                 );
                 this._bufferFullWarned = true;
             }
-            // Tail-drop: discard the incoming event instead of O(N) shift()
-            return;
+            // Emergency sync-flush to stdout to apply backpressure and prevent data loss
+            this._flushSync();
         }
         
         this._buffer.push(event);

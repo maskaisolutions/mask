@@ -241,10 +241,16 @@ export function getScanner(): BaseScanner {
       const { RemoteScanner } = require('./remote_scanner');
       scannerInstance = new RemoteScanner();
     } else {
-      // Use the local Transformers-based scanner by default for full NLP support
       const { LocalTransformersScanner } = require('./transformers_scanner');
       scannerInstance = new LocalTransformersScanner();
     }
   }
   return scannerInstance as BaseScanner;
+}
+
+export function resetScanner(): void {
+  if (scannerInstance && (scannerInstance as any).close) {
+    (scannerInstance as any).close();
+  }
+  scannerInstance = null;
 }

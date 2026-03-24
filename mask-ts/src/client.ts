@@ -8,7 +8,8 @@
 import { BaseVault, getVault, decode, encode, detokenizeText, _hashPlaintext } from './core/vault';
 import { CryptoEngine, getCryptoEngine, getCryptoEngineAsync } from './core/crypto';
 import { BaseScanner, getScanner } from './core/scanner';
-import { looksLikeToken } from './core/fpe_utils';
+import { TOKEN_PATTERN, looksLikeToken } from './core/fpe_utils';
+import { generateFPEToken } from './core/fpe';
 import { AuditLogger, getAuditLogger } from './telemetry/audit_logger';
 
 export class MaskClient {
@@ -83,7 +84,11 @@ export class MaskClient {
       return existingToken;
     }
 
-    return await encode(rawText, { ttl: this.ttl });
+    const token = await generateFPEToken(text);
+    const ciphertext = this.crypto.encrypt(text);
+    await this.vault.store(token, ciphertext, this.ttl, ptHash);
+    this.logger.log("encode", token);
+    return token;
   }
 
   /** Retrieve token from vault and decrypt it. */
@@ -92,10 +97,10 @@ export class MaskClient {
       return await decode(token);
     } catch (e) {
       this.logger.log("error", token, "opaque", "decryption_failed");
-      if (process.env.MASK_STRICT_PROD === 'true') {
-        throw e;
+      if (process.env.MASK_DEV_MODE === 'true') {
+        return token;
       }
-      return token;
+      throw e;
     }
   }
 
@@ -121,14 +126,33 @@ export class MaskClient {
     return await this.scanAndTokenize(text);
   }
 
-  /** Find and replace all tokens within text with their plaintext. */
   async detokenizeText(text: string): Promise<string> {
+    // Leverage the optimized concurrent implementation in vault.ts
     return await detokenizeText(text);
   }
 
   /** Async wrapper for detokenizeText (parity with Python adetokenize_text). */
   async adetokenizeText(text: string): Promise<string> {
     return await this.detokenizeText(text);
+  }
+
+  /**
+   * Gracefully shut down all SDK resources (worker pools, vault connections, audit logger).
+   * Call this during application shutdown to prevent the Node.js process from hanging.
+   */
+  async close(): Promise<void> {
+    try {
+      // Shut down the NLP worker pool if the scanner supports it
+      if (this.scanner && typeof (this.scanner as any).close === 'function') {
+        await (this.scanner as any).close();
+      }
+    } catch { /* best-effort */ }
+
+    try {
+      await this.auditLogger.stop();
+    } catch { /* best-effort */ }
+
+    console.info('MaskClient closed.');
   }
 }
 

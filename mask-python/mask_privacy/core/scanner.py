@@ -17,9 +17,9 @@ and cannot produce contradictory results.
 import os
 import re
 import logging
-import threading
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Optional, List, Dict, Callable
+from typing import Optional, List, Dict, Callable, Awaitable, Any, Union
 
 try:
     from presidio_analyzer import AnalyzerEngine
@@ -36,8 +36,49 @@ from mask_privacy.core.fpe import generate_fpe_token, looks_like_token
 
 logger = logging.getLogger("mask.scanner")
 
-# Persistent thread pool for NLP analysis to avoid per-call thread churn
-_SCANNER_POOL = ThreadPoolExecutor(max_workers=int(os.environ.get("MASK_NLP_MAX_WORKERS", "4")))
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeoutError
+
+# Global variables for the worker processes (initialized per-worker)
+_worker_analyzer = None
+
+def _init_worker() -> None:
+    """Initialize the Presidio Analyzer inside the worker process to avoid pickling models."""
+    global _worker_analyzer
+    import spacy
+    available_models = [m for m in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm") if spacy.util.is_package(m)]
+    if not available_models: return
+    selected_model = available_models[0]
+    
+    from presidio_analyzer import AnalyzerEngine
+    from presidio_analyzer.nlp_engine import NlpEngineProvider
+    provider = NlpEngineProvider(nlp_configuration={
+        "nlp_engine_name": "spacy",
+        "models": [{"lang_code": "en", "model_name": selected_model}],
+    })
+    _worker_analyzer = AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["en"])
+
+def _run_analyzer(text: str, entities: List[str]) -> Any:
+    """Top-level function to be executed by the ProcessPoolExecutor."""
+    if _worker_analyzer is None:
+        raise RuntimeError("Scanner worker not initialized with spaCy model.")
+    return _worker_analyzer.analyze(text=text, entities=entities, language="en")
+
+import threading
+
+# Persistent process pool for NLP analysis to aggressively isolate heavy compute and avoid the GIL
+_SCANNER_POOL = None
+_POOL_LOCK = threading.Lock()
+
+def _get_scanner_pool() -> ProcessPoolExecutor:
+    global _SCANNER_POOL
+    if _SCANNER_POOL is None:
+        with _POOL_LOCK:
+            if _SCANNER_POOL is None:
+                _SCANNER_POOL = ProcessPoolExecutor(
+                    max_workers=int(os.environ.get("MASK_NLP_MAX_WORKERS", "4")),
+                    initializer=_init_worker
+                )
+    return _SCANNER_POOL
 
 # Regex patterns for Tier 1 deterministic detection
 
@@ -95,19 +136,8 @@ class PresidioScanner:
                 'pip install "mask-privacy[sm]" (Small) or pip install "mask-privacy[lg]" (Large).'
             )
         selected_model = available_models[0]
-        logger.info("Using spaCy model: %s", selected_model)
+        logger.info("Using spaCy model: %s (in worker processes)", selected_model)
 
-        from presidio_analyzer.nlp_engine import NlpEngineProvider
-        provider = NlpEngineProvider(nlp_configuration={
-            "nlp_engine_name": "spacy",
-            "models": [{"lang_code": "en", "model_name": selected_model}],
-        })
-        nlp_engine = provider.create_engine()
-
-        self._analyzer = AnalyzerEngine(
-            nlp_engine=nlp_engine, supported_languages=["en"]
-        )
-        self._anonymizer = AnonymizerEngine()
         self._supported_entities = [
             "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD",
             "US_BANK_NUMBER", "CRYPTO", "IBAN_CODE", "IP_ADDRESS", "PERSON",
@@ -183,6 +213,8 @@ class PresidioScanner:
                 token = encode_fn(val)
                 excised = excised[:start] + token + excised[end:]
                 entities.append({
+                    "start": start,
+                    "end": end,
                     "type": etype,
                     "value": val,
                     "method": "regex",
@@ -213,14 +245,17 @@ class PresidioScanner:
 
         entities: List[Dict] = []
 
-        # Run the heavy NLP analysis with a timeout guard
-        future = _SCANNER_POOL.submit(
-            self._analyzer.analyze,
-            text=text, entities=self._supported_entities, language="en",
+        # Run the heavy NLP analysis in the Process Pool
+        pool = _get_scanner_pool()
+        future = pool.submit(
+            _run_analyzer,
+            text, self._supported_entities
         )
         try:
             results = future.result(timeout=timeout)
         except FuturesTimeoutError:
+            # Try to cancel to free up pool resources
+            future.cancel()
             raise MaskNLPTimeout(
                 f"Presidio analysis exceeded {timeout}s timeout"
             )
@@ -328,18 +363,161 @@ class PresidioScanner:
     async def ascan_and_tokenize(
         self,
         text: str,
-        encode_fn: Optional[Callable[[str], str]] = None,
+        encode_fn: Optional[Callable[[str], Awaitable[str]]] = None,
         pipeline: Optional[List[str]] = None,
         confidence_threshold: float = 0.7,
         context: Optional[str] = None,
         aggressive: bool = False,
     ) -> str:
-        """Async wrapper for ``scan_and_tokenize``."""
+        """Native async version of ``scan_and_tokenize``.
+        
+        This method is non-blocking: it runs the Tier 2 NLP in a process pool
+        and waits for the result without blocking the asyncio event loop.
+        """
+        if not text or not isinstance(text, str):
+            return text
+
+        pipeline = pipeline or ["regex", "checksum", "nlp"]
+        
+        # Default to vault.aencode if not provided
+        if encode_fn is None:
+            from mask_privacy.core.vault import aencode
+            _encode = aencode
+        else:
+            _encode = encode_fn
+            
+        boost = self._resolve_boost(context)
+
+        # --- Tier 1: Deterministic ---
+        # Tier 1 is CPU-bound but extremely fast, so running it in-line is fine.
+        # However, we must ensure it uses the sync encode if necessary, or just wait if async.
+        # For simplicity, we wrap the sync tier1 and then handle the async encode.
+        if "regex" in pipeline or "checksum" in pipeline:
+            # We do a special two-pass here if _encode is async
+            # Pass 1: find entities
+            _, entities = self._tier1_regex(text, lambda x: x, boost, aggressive, confidence_threshold)
+            # Pass 2: encode concurrently
+            if entities:
+                vals = [e["value"] for e in entities]
+                tokens = await asyncio.gather(*[_encode(v) for v in vals])
+                # Replace from right to left
+                entities.sort(key=lambda x: x.get("start", 0), reverse=True)
+                for i, e in enumerate(reversed(entities)):
+                    idx = len(entities) - 1 - i
+                    text = text[:entities[idx]["start"]] + tokens[idx] + text[entities[idx]["end"]:]
+
+        # --- Tier 2: Probabilistic (on the *remaining* text) ---
+        if "nlp" in pipeline:
+            text, _ = await self._atier2_nlp(text, _encode, boost, aggressive, confidence_threshold)
+
+        return text
+
+    async def ascan_and_return_entities(
+        self,
+        text: str,
+        encode_fn: Optional[Callable[[str], Awaitable[str]]] = None,
+        pipeline: Optional[List[str]] = None,
+        confidence_threshold: float = 0.7,
+        context: Optional[str] = None,
+        aggressive: bool = False,
+    ) -> List[Dict]:
+        """Async version of ``scan_and_return_entities``."""
+        if not text or not isinstance(text, str):
+            return []
+
+        pipeline = pipeline or ["regex", "checksum", "nlp"]
+        if encode_fn is None:
+            from mask_privacy.core.vault import aencode
+            _encode = aencode
+        else:
+            _encode = encode_fn
+            
+        boost = self._resolve_boost(context)
+        all_entities: List[Dict] = []
+
+        remaining = text
+
+        if "regex" in pipeline or "checksum" in pipeline:
+            _, tier1 = self._tier1_regex(remaining, lambda x: x, boost, aggressive, confidence_threshold)
+            if tier1:
+                vals = [e["value"] for e in tier1]
+                tokens = await asyncio.gather(*[_encode(v) for v in vals])
+                for i, t in enumerate(tokens):
+                    tier1[i]["masked_value"] = t
+                all_entities.extend(tier1)
+                # Apply replacements to 'remaining' to avoid double-detection in NLP
+                tier1_sorted = sorted(tier1, key=lambda x: x["start"], reverse=True)
+                for e in tier1_sorted:
+                    remaining = remaining[:e["start"]] + e["masked_value"] + remaining[e["end"]:]
+
+        if "nlp" in pipeline:
+            _, tier2 = await self._atier2_nlp(remaining, _encode, boost, aggressive, confidence_threshold)
+            all_entities.extend(tier2)
+
+        return all_entities
+
+    async def _atier2_nlp(
+        self,
+        text: str,
+        encode_fn: Callable[[str], Awaitable[str]],
+        boost_entities: frozenset,
+        aggressive: bool,
+        confidence_threshold: float,
+    ) -> tuple[str, List[Dict]]:
+        """Async version of _tier2_nlp that uses asyncio.wrap_future."""
         import asyncio
-        return await asyncio.to_thread(
-            self.scan_and_tokenize,
-            text, encode_fn, pipeline, confidence_threshold, context, aggressive
-        )
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+        from mask_privacy.core.exceptions import MaskNLPTimeout
+
+        timeout = float(os.environ.get("MASK_NLP_TIMEOUT_SECONDS", "60"))
+        entities: List[Dict] = []
+
+        pool = _get_scanner_pool()
+        future = pool.submit(_run_analyzer, text, self._supported_entities)
+        
+        # Convert to asyncio future
+        loop = asyncio.get_event_loop()
+        try:
+            results = await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+        except (asyncio.TimeoutError, FuturesTimeoutError):
+            future.cancel()
+            raise MaskNLPTimeout(f"Presidio analysis exceeded {timeout}s timeout")
+
+        masked_text = text
+        results.sort(key=lambda r: r.start, reverse=True)
+        
+        # Collection phase: find all values to encode
+        to_encode = []
+        valid_results = []
+        for r in results:
+            confidence = r.score if hasattr(r, "score") else 0.7
+            if aggressive or r.entity_type.lower().replace("_", " ") in boost_entities:
+                confidence = min(1.0, confidence + 0.2)
+            
+            val = text[r.start:r.end]
+            if confidence >= confidence_threshold and not looks_like_token(val):
+                to_encode.append(val)
+                valid_results.append((r, confidence))
+
+        # Parallel encode
+        tokens = await asyncio.gather(*[encode_fn(v) for v in to_encode])
+
+        # Replacement phase (right to left)
+        for i, (r, confidence) in enumerate(valid_results):
+            token = tokens[i]
+            val = text[r.start:r.end]
+            masked_text = masked_text[:r.start] + token + masked_text[r.end:]
+            entities.append({
+                "type": r.entity_type,
+                "value": val,
+                "method": "nlp",
+                "confidence": confidence,
+                "masked_value": token,
+                "start": r.start, # Add start/end for async processing
+                "end": r.end,
+            })
+
+        return masked_text, entities
 
 
 class RemotePresidioScanner(PresidioScanner):
@@ -364,29 +542,37 @@ class RemotePresidioScanner(PresidioScanner):
         self._httpx = httpx
         logger.info("Using RemotePresidioScanner at %s", endpoint_url)
 
-    def _tier2_nlp(
+    async def _atier2_nlp(
         self,
         text: str,
-        encode_fn: Callable[[str], str],
+        encode_fn: Callable[[str], Awaitable[str]],
         boost_entities: frozenset,
         aggressive: bool,
         confidence_threshold: float,
     ) -> tuple[str, List[Dict]]:
+        """Async version of remote NLP scan using httpx.AsyncClient."""
+        import httpx
         entities: List[Dict] = []
+        
         try:
-            resp = self._httpx.post(
-                self.endpoint_url,
-                json={"text": text, "language": "en"}
-            )
-            resp.raise_for_status()
-            results = resp.json()
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    self.endpoint_url,
+                    json={"text": text, "language": "en"},
+                    timeout=30.0
+                )
+                resp.raise_for_status()
+                results = resp.json()
         except Exception as e:
             logger.error("Remote NLP scan failed: %s", e)
             return text, []
 
         masked_text = text
-        # Assuming the standard Presidio API schema
         results.sort(key=lambda r: r.get("start", 0), reverse=True)
+        
+        # Collection & Parallel Encode
+        to_encode = []
+        valid_results = []
         for r in results:
             start, end, entity_type = r["start"], r["end"], r["entity_type"]
             confidence = r.get("score", 0.7)
@@ -395,17 +581,53 @@ class RemotePresidioScanner(PresidioScanner):
 
             val = text[start:end]
             if confidence >= confidence_threshold and not looks_like_token(val):
-                token = encode_fn(val)
-                masked_text = masked_text[:start] + token + masked_text[end:]
-                entities.append({
-                    "type": entity_type,
-                    "value": val,
-                    "method": "nlp-remote",
-                    "confidence": confidence,
-                    "masked_value": token,
-                })
+                to_encode.append(val)
+                valid_results.append((r, confidence))
+
+        tokens = await asyncio.gather(*[encode_fn(v) for v in to_encode])
+
+        for i, (r, confidence) in enumerate(valid_results):
+            token = tokens[i]
+            start, end = r["start"], r["end"]
+            val = text[start:end]
+            masked_text = masked_text[:start] + token + masked_text[end:]
+            entities.append({
+                "type": r["entity_type"],
+                "value": val,
+                "method": "nlp-remote",
+                "confidence": confidence,
+                "masked_value": token,
+            })
 
         return masked_text, entities
+
+    async def ascan_and_tokenize(
+        self,
+        text: str,
+        encode_fn: Optional[Callable[[str], Awaitable[str]]] = None,
+        pipeline: Optional[List[str]] = None,
+        confidence_threshold: float = 0.7,
+        context: Optional[str] = None,
+        aggressive: bool = False,
+    ) -> str:
+        """Native async version for RemotePresidioScanner."""
+        if not text or not isinstance(text, str):
+            return text
+
+        if encode_fn is None:
+            from mask_privacy.core.vault import aencode
+            _encode = aencode
+        else:
+            _encode = encode_fn
+            
+        boost = self._resolve_boost(context)
+        
+        # Remote scanner only supports 'nlp' currently, but we follow the pipeline
+        pipeline = pipeline or ["nlp"]
+        if "nlp" in pipeline:
+            text, _ = await self._atier2_nlp(text, _encode, boost, aggressive, confidence_threshold)
+            
+        return text
 
 
 # Thread-safe singleton
@@ -428,3 +650,16 @@ def get_scanner() -> PresidioScanner:
                 else:
                     _scanner_instance = PresidioScanner()
     return _scanner_instance
+
+
+def close_scanner() -> None:
+    """Shutdown the scanner process pool. Usually called via atexit."""
+    with _POOL_LOCK:
+        if _SCANNER_POOL:
+            _SCANNER_POOL.shutdown(wait=True)
+            logger.info("Scanner process pool shut down.")
+
+
+# Register graceful shutdown
+import atexit
+atexit.register(close_scanner)

@@ -60,17 +60,17 @@ describe('TestKeyProvider', () => {
     // Mock AWS
     const aws = new AwsKmsKeyProvider("alias/key");
     // @ts-ignore - mock internal
-    aws._getSecretsClient = jest.fn().mockReturnValue({
-      send: jest.fn().mockResolvedValue({ SecretString: "aws-key" })
-    });
+    aws._getSecretsClient = () => ({
+      send: async () => ({ SecretString: "aws-key" })
+    }) as any;
     expect(await aws.getEncryptionKey()).toBe("aws-key");
 
     // Mock Azure
     const azure = new AzureKeyVaultProvider("https://vault");
     // @ts-ignore
-    azure._getClient = jest.fn().mockReturnValue({
-      getSecret: jest.fn().mockResolvedValue({ value: "azure-key" })
-    });
+    azure._getClient = () => ({
+      getSecret: async () => ({ value: "azure-key" })
+    }) as any;
     expect(await azure.getEncryptionKey()).toBe("azure-key");
 
     // Mock HashiCorp
@@ -78,7 +78,7 @@ describe('TestKeyProvider', () => {
     // We need to mock axios
     jest.mock('axios');
     const axios = require('axios');
-    axios.get = jest.fn().mockResolvedValue({ 
+    axios.get = async () => ({ 
       data: { data: { data: { value: "hashi-key" } } } 
     });
     expect(await hashi.getEncryptionKey()).toBe("hashi-key");

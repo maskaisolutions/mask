@@ -1,13 +1,19 @@
-import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { describe, test, expect, beforeEach, afterEach, afterAll, jest } from '@jest/globals';
 import { encode, resetVault } from '../src/core/vault';
 import { resetMasterKey } from '../src/core/fpe';
+import { resetScanner } from '../src/core/scanner';
 import { MaskToolWrapper, maskLlamaIndexHooks } from '../src/integrations/llamaindex_hooks';
+import { getAuditLogger } from '../src/telemetry/audit_logger';
 import * as process from 'process';
+
+jest.setTimeout(10000);
 
 describe('TestLlamaindexHooks', () => {
     beforeEach(() => {
         process.env.MASK_VAULT_TYPE = "memory";
+        process.env.MASK_SCANNER_TYPE = "regex";
         resetVault();
+        resetScanner();
         resetMasterKey();
         process.env.MASK_MASTER_KEY = "test-llamaindex-key";
     });
@@ -16,6 +22,10 @@ describe('TestLlamaindexHooks', () => {
         resetVault();
         resetMasterKey();
         jest.restoreAllMocks();
+    });
+
+    afterAll(async () => {
+        await getAuditLogger().stop();
     });
 
     describe('TestLlamaindexMaskToolWrapper', () => {

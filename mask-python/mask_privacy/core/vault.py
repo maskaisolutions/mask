@@ -22,15 +22,31 @@ class DecodeError(Exception):
 
 logger = logging.getLogger("mask.vault")
 
+_STRATEGY_WARNED = False
+
 def _get_fail_strategy() -> str:
-    return os.environ.get("MASK_FAIL_STRATEGY", "open").lower()
+    global _STRATEGY_WARNED
+    strategy = os.environ.get("MASK_FAIL_STRATEGY", "").lower()
+    if not strategy:
+        if os.environ.get("MASK_STRICT_PROD") == "true":
+            return "closed"
+        if not _STRATEGY_WARNED:
+            logger.warning("MASK_FAIL_STRATEGY is unset; defaulting to 'open'. PII may leak during vault failures.")
+            _STRATEGY_WARNED = True
+        return "open"
+    return strategy
 
 def _hash_plaintext(plaintext: str, secret: Optional[bytes] = None) -> str:
-    """Deterministically hash plaintext for reverse lookups."""
+    """Deterministically hash plaintext for reverse lookups.
+    
+    Uses HMAC-SHA256 with an enterprise-configurable salt to prevent leakage.
+    """
     trimmed = plaintext.strip()
-    if secret:
-        return hmac.new(secret, trimmed.encode("utf-8"), hashlib.sha256).hexdigest()
-    return hashlib.sha256(trimmed.encode("utf-8")).hexdigest()
+    if secret is None:
+        from mask_privacy.core.crypto import get_crypto_engine
+        secret = get_crypto_engine().get_index_secret()
+        
+    return hmac.new(secret, trimmed.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 class BaseVault:
@@ -59,8 +75,10 @@ class MemoryVault(BaseVault):
 
     def _cleanup(self) -> None:
         import random
-        # Probabilistic cleanup: only scan O(N) entries ~1% of the time to avoid blocking
-        if random.random() > 0.01:
+        # Probabilistic cleanup to prevent memory bloat
+        # Configurable frequency (default 1%) balances CPU vs Memory usage
+        cleanup_freq = float(os.environ.get("MASK_VAULT_CLEANUP_FREQUENCY", "0.01"))
+        if random.random() > cleanup_freq:
             return
             
         now = time.time()
@@ -141,8 +159,7 @@ class RedisVault(BaseVault):
                 pipe.setex(f"mask-hash:{token}", ttl_seconds, pt_hash)
             pipe.execute()
         except Exception as e:
-            if _get_fail_strategy() == "closed":
-                raise MaskVaultConnectionError(f"Redis write failed: {e}")
+            raise MaskVaultConnectionError(f"Redis write failed: {e}")
 
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
         try:
@@ -172,8 +189,71 @@ class RedisVault(BaseVault):
             if pt_hash:
                 pipe.delete(f"mask-rev:{pt_hash}")
             pipe.execute()
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"Redis delete failed: {e}")
+            logger.warning("Redis delete failed: %s", e)
+
+
+class AsyncRedisVault:
+    """Async Redis vault using native ``redis.asyncio`` for zero-thread-pool I/O.
+
+    Used internally by ``aencode`` / ``adecode`` for high-throughput async workloads.
+    Falls back to wrapping ``RedisVault`` in ``asyncio.to_thread`` if ``redis.asyncio``
+    is not available.
+    """
+
+    def __init__(self, **options: Any):
+        try:
+            import redis.asyncio as aioredis
+            url = os.environ.get("MASK_REDIS_URL", "redis://localhost:6379/0")
+            self._client = aioredis.from_url(url, decode_responses=True, **options)
+            logger.info("AsyncRedisVault connected to %s", url)
+        except Exception as e:
+            raise MaskVaultConnectionError(f"Failed to connect to async Redis: {e}")
+
+    async def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+        try:
+            pipe = self._client.pipeline()
+            pipe.setex(f"mask:{token}", ttl_seconds, ciphertext)
+            if pt_hash:
+                pipe.setex(f"mask-rev:{pt_hash}", ttl_seconds, token)
+                pipe.setex(f"mask-hash:{token}", ttl_seconds, pt_hash)
+            await pipe.execute()
+        except Exception as e:
+            raise MaskVaultConnectionError(f"Async Redis write failed: {e}")
+
+    async def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
+        try:
+            token = await self._client.get(f"mask-rev:{pt_hash}")
+            if not token:
+                return None
+            actual = await self.retrieve(token)
+            return token if actual else None
         except:
-            pass
+            return None
+
+    async def retrieve(self, token: str) -> Optional[str]:
+        try:
+            return await self._client.get(f"mask:{token}")
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"Async Redis read failed: {e}")
+            return None
+
+    async def delete(self, token: str) -> None:
+        try:
+            pt_hash = await self._client.get(f"mask-hash:{token}")
+            pipe = self._client.pipeline()
+            pipe.delete(f"mask:{token}")
+            pipe.delete(f"mask-hash:{token}")
+            if pt_hash:
+                pipe.delete(f"mask-rev:{pt_hash}")
+            await pipe.execute()
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"Async Redis delete failed: {e}")
+            logger.warning("Async Redis delete failed: %s", e)
 
 
 class DynamoDBVault(BaseVault):
@@ -235,8 +315,7 @@ class DynamoDBVault(BaseVault):
                     }
                 )
             except Exception as e:
-                if _get_fail_strategy() == "closed":
-                    raise MaskVaultConnectionError(f"DynamoDB write failed: {e}")
+                raise MaskVaultConnectionError(f"DynamoDB write failed: {e}")
 
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
         try:
@@ -284,8 +363,10 @@ class DynamoDBVault(BaseVault):
             if item and item.get("ptr_hash"):
                 self._table.delete_item(Key={"token": f"mask-rev:{item['ptr_hash']}"})
             self._table.delete_item(Key={"token": f"mask:{token}"})
-        except:
-            pass
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"DynamoDB delete failed: {e}")
+            logger.warning("DynamoDB delete failed: %s", e)
 
 
 class MemcachedVault(BaseVault):
@@ -309,8 +390,7 @@ class MemcachedVault(BaseVault):
                 data[f"mask-hash:{token}"] = pt_hash
             self._client.set_multi(data, expire=ttl_seconds)
         except Exception as e:
-            if _get_fail_strategy() == "closed":
-                raise MaskVaultConnectionError(f"Memcached write failed: {e}")
+            raise MaskVaultConnectionError(f"Memcached write failed: {e}")
 
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
         try:
@@ -341,19 +421,25 @@ class MemcachedVault(BaseVault):
                 h = pt_hash.decode("utf-8") if isinstance(pt_hash, bytes) else str(pt_hash)
                 keys.append(f"mask-rev:{h}")
             self._client.delete_multi(keys)
-        except:
-            pass
+        except Exception as e:
+            if _get_fail_strategy() == "closed":
+                raise MaskVaultConnectionError(f"Memcached delete failed: {e}")
+            logger.warning("Memcached delete failed: %s", e)
 
 
 # Singleton accessor
 
+_vault_lock = threading.Lock()
 _vault_instance: Optional[BaseVault] = None
 DEFAULT_TTL = int(os.environ.get("MASK_VAULT_TTL", "600"))
 
 def get_vault() -> BaseVault:
+    """Return the active vault singleton (lazy-init, thread-safe)."""
     global _vault_instance
     if _vault_instance is None:
-        vault_type = os.environ.get("MASK_VAULT_TYPE", "memory").lower()
+        with _vault_lock:
+            if _vault_instance is None:
+                vault_type = os.environ.get("MASK_VAULT_TYPE", "memory").lower()
         if vault_type == "redis":
             _vault_instance = RedisVault()
         elif vault_type == "dynamodb":
@@ -392,7 +478,7 @@ def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[s
     ciphertext = crypto.encrypt(text)
     effective_ttl = ttl or DEFAULT_TTL
 
-    # 3. Store primary record
+    # 3. Store primary record — always fail-shut to prevent PII leakage
     vault.store(token, ciphertext, effective_ttl, pt_hash)
 
     # 4. Search buckets
@@ -431,13 +517,80 @@ def _decode_lenient(token: str) -> str:
     except:
         return token
 
-def adecode(token: str):
-    import asyncio
-    return asyncio.to_thread(decode, token)
+_async_vault_instance: Any = None
 
-def aencode(text: str, **kwargs):
-    import asyncio
-    return asyncio.to_thread(encode, text, **kwargs)
+def get_async_vault() -> Any:
+    global _async_vault_instance
+    if _async_vault_instance is None:
+        vault_type = os.environ.get("MASK_VAULT_TYPE", "memory").lower()
+        if vault_type == "redis":
+            _async_vault_instance = AsyncRedisVault()
+        else:
+            _async_vault_instance = False
+    return _async_vault_instance if _async_vault_instance is not False else None
+
+
+async def adecode(token: str) -> str:
+    """Native async decode — uses AsyncRedisVault when vault type is 'redis', otherwise falls back to to_thread."""
+    async_vault = get_async_vault()
+    if not async_vault:
+        import asyncio
+        from functools import partial
+        return await asyncio.to_thread(partial(decode, token))
+
+    ciphertext = await async_vault.retrieve(token)
+    if ciphertext is None:
+        raise DecodeError("Token expired or missing")
+
+    try:
+        from mask_privacy.core.crypto import get_crypto_engine
+        from mask_privacy.telemetry.audit_logger import get_audit_logger
+        crypto = get_crypto_engine()
+        plaintext = crypto.decrypt(ciphertext)
+        get_audit_logger().log("decode", token)
+        return plaintext
+    except Exception as e:
+        logger.error("Failed to decrypt token %s: %s", token, e)
+        raise DecodeError(f"Decryption failed for token {token}: {e}")
+
+async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10) -> str:
+    """Native async encode — uses AsyncRedisVault when vault type is 'redis', otherwise falls back to to_thread."""
+    if looks_like_token(text):
+        return text
+
+    async_vault = get_async_vault()
+    if not async_vault:
+        import asyncio
+        from functools import partial
+        return await asyncio.to_thread(partial(encode, text, ttl=ttl, search_buckets=search_buckets, search_bucket_size=search_bucket_size))
+
+    crypto = get_crypto_engine()
+    index_secret = crypto.get_index_secret()
+    pt_hash = _hash_plaintext(text, index_secret)
+
+    existing = await async_vault.get_token_by_plaintext_hash(pt_hash)
+    if existing and await async_vault.retrieve(existing):
+        get_audit_logger().log("dedup", existing)
+        return existing
+
+    token = generate_fpe_token(text)
+    ciphertext = crypto.encrypt(text)
+    effective_ttl = ttl or DEFAULT_TTL
+
+    # Always fail-shut to prevent PII leakage
+    await async_vault.store(token, ciphertext, effective_ttl, pt_hash)
+    
+    if search_buckets:
+        for b_type in search_buckets:
+            if b_type == "numeric":
+                b_val = BucketManager.numeric_bucket(text, search_bucket_size)
+            else:
+                b_val = BucketManager.date_bucket(text, b_type)
+            b_hash = BucketManager.get_bucket_index(b_val)
+            await async_vault.store(token, ciphertext, effective_ttl, b_hash)
+
+    get_audit_logger().log("encode", token)
+    return token
 
 def detokenize_text(text: str) -> str:
     import re
@@ -451,6 +604,33 @@ def detokenize_text(text: str) -> str:
 
     return re.sub(TOKEN_PATTERN, replace_match, text)
 
-def adetokenize_text(text: str):
+async def adetokenize_text(text: str) -> str:
+    """Native async detokenize — decodes all tokens in text concurrently."""
+    import re
     import asyncio
-    return asyncio.to_thread(detokenize_text, text)
+    from mask_privacy.core.fpe import TOKEN_PATTERN
+    
+    if not text or not isinstance(text, str):
+        return text
+
+    tokens = re.findall(TOKEN_PATTERN, text)
+    if not tokens:
+        return text
+
+    # Decode all tokens concurrently
+    async def _decode_one(tok: str) -> tuple:
+        try:
+            plaintext = await asyncio.to_thread(decode, tok)
+            return (tok, plaintext)
+        except:
+            return (tok, tok)
+
+    results = await asyncio.gather(*[_decode_one(t) for t in set(tokens)])
+    
+    result = text
+    for tok, plaintext in results:
+        if plaintext != tok:
+            result = result.replace(tok, plaintext)
+    
+    return result
+

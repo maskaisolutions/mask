@@ -26,9 +26,21 @@ import { BucketManager } from './search';
  * - closed: vault errors raise MaskVaultConnectionError (strict).
  */
 
+let strategyWarned = false;
+
 /** @internal - exported for tests */
 export function _getFailStrategy(): string {
-  const strategy = (process.env.MASK_FAIL_STRATEGY || "open").toLowerCase();
+  const strategy = (process.env.MASK_FAIL_STRATEGY || "").toLowerCase();
+  if (!strategy) {
+    if (process.env.MASK_STRICT_PROD === "true") {
+      return "closed";
+    }
+    if (!strategyWarned) {
+      console.warn("MASK_FAIL_STRATEGY is unset; defaulting to 'open'. PII may leak during vault failures.");
+      strategyWarned = true;
+    }
+    return "open";
+  }
   return strategy;
 }
 
@@ -78,8 +90,10 @@ export class MemoryVault extends BaseVault {
   }
 
   private _cleanup(): void {
-    // Probabilistic cleanup: only run ~1% of the time to avoid O(N) blocking
-    if (Math.random() > 0.01) {
+    // Probabilistic cleanup to prevent memory bloat
+    // Configurable frequency (default 1%) balances CPU vs Memory usage
+    const cleanupFreq = parseFloat(process.env.MASK_VAULT_CLEANUP_FREQUENCY || "0.01");
+    if (Math.random() > cleanupFreq) {
       return;
     }
 
@@ -159,8 +173,26 @@ export class RedisVault extends BaseVault {
       const url = process.env.MASK_REDIS_URL || "redis://localhost:6379/0";
       this._client = new Redis(url, {
         ...options,
-        // Ensure connectivity at init time
-        maxRetriesPerRequest: 3
+        maxRetriesPerRequest: 5,
+        retryStrategy: (times: number) => {
+          if (times > 5) {
+            // Stop retrying after 5 attempts
+            return null;
+          }
+          // Exponential backoff with jitter: base 100ms, max 3s
+          const baseDelay = 100;
+          const exponentialDelay = Math.min(baseDelay * Math.pow(2, times - 1), 3000);
+          const jitter = Math.random() * exponentialDelay * 0.1; // 10% jitter
+          return Math.floor(exponentialDelay + jitter);
+        },
+        reconnectOnError: (err: any) => {
+          // Reconnect on READONLY errors (e.g., during failover)
+          const targetError = 'READONLY';
+          if (err.message.includes(targetError)) {
+            return true;
+          }
+          return false;
+        },
       });
       console.info(`RedisVault connected to ${url}`);
     } catch (e) {
@@ -183,37 +215,55 @@ export class RedisVault extends BaseVault {
         }
       }
     } catch (e) {
-      if (_getFailStrategy() === "closed") {
-        throw new MaskVaultConnectionError(`Redis error: ${e}`);
-      }
+      throw new MaskVaultConnectionError(`Redis error: ${e}`);
     }
   }
 
   async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
-    const token = await this._client.get(`mask-rev:${ptHash}`);
-    if (token) {
-      if (await this._client.exists(`mask:${token}`)) {
-        return token;
-      } else {
-        await this._client.del(`mask-rev:${ptHash}`);
+    try {
+      const token = await this._client.get(`mask-rev:${ptHash}`);
+      if (token) {
+        if (await this._client.exists(`mask:${token}`)) {
+          return token;
+        } else {
+          await this._client.del(`mask-rev:${ptHash}`);
+        }
       }
+      return null;
+    } catch (e) {
+      if (_getFailStrategy() === 'closed') {
+        throw new MaskVaultConnectionError(`Redis read failed: ${e}`);
+      }
+      return null;
     }
-    return null;
   }
 
   async retrieve(token: string): Promise<string | null> {
-    return await this._client.get(`mask:${token}`);
+    try {
+      return await this._client.get(`mask:${token}`);
+    } catch (e) {
+      if (_getFailStrategy() === 'closed') {
+        throw new MaskVaultConnectionError(`Redis read failed: ${e}`);
+      }
+      return null;
+    }
   }
 
   async delete(token: string): Promise<void> {
-    const ptHash = await this._client.get(`mask-hash:${token}`);
-    const pipeline = this._client.pipeline();
-    pipeline.del(`mask:${token}`);
-    pipeline.del(`mask-hash:${token}`);
-    if (ptHash) {
-      pipeline.del(`mask-rev:${ptHash}`);
+    try {
+      const ptHash = await this._client.get(`mask-hash:${token}`);
+      const pipeline = this._client.pipeline();
+      pipeline.del(`mask:${token}`);
+      pipeline.del(`mask-hash:${token}`);
+      if (ptHash) {
+        pipeline.del(`mask-rev:${ptHash}`);
+      }
+      await pipeline.exec();
+    } catch (e) {
+      if (_getFailStrategy() === 'closed') {
+        throw new MaskVaultConnectionError(`Redis delete failed: ${e}`);
+      }
     }
-    await pipeline.exec();
   }
 }
 
@@ -232,7 +282,28 @@ export class DynamoDBVault extends BaseVault {
     this._region = process.env.MASK_DYNAMODB_REGION || "us-east-1";
     this._tableName = process.env.MASK_DYNAMODB_TABLE || "mask-vault";
     
-    const baseClient = new DynamoDBClient({ region: this._region });
+    // Optimize connection pooling for high-throughput
+    const https = require('https');
+    const agent = new https.Agent({
+      keepAlive: true,
+      maxSockets: parseInt(process.env.MASK_DYNAMODB_MAX_SOCKETS || "50", 10)
+    });
+
+    let requestHandler;
+    try {
+      const { NodeHttpHandler } = require('@smithy/node-http-handler');
+      requestHandler = new NodeHttpHandler({ httpsAgent: agent });
+    } catch (e) {
+      try {
+        const { NodeHttpHandler } = require('@aws-sdk/node-http-handler');
+        requestHandler = new NodeHttpHandler({ httpsAgent: agent });
+      } catch (e2) {}
+    }
+
+    const clientOpts: any = { region: this._region };
+    if (requestHandler) clientOpts.requestHandler = requestHandler;
+
+    const baseClient = new DynamoDBClient(clientOpts);
     this._client = DynamoDBDocument.from(baseClient);
     console.info(`DynamoDBVault connected to table ${this._tableName} in ${this._region}`);
   }
@@ -286,61 +357,73 @@ export class DynamoDBVault extends BaseVault {
       try {
         await this._client.send(new PutCommand({ TableName: this._tableName, Item: item }));
       } catch (e: any) {
-        if (_getFailStrategy() === "closed") {
-          throw new MaskVaultConnectionError(`DynamoDB individual write failed: ${e}`);
-        }
+        throw new MaskVaultConnectionError(`DynamoDB individual write failed: ${e}`);
       }
     }
   }
 
   async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
-    const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
-    const now = Math.floor(Date.now() / 1000);
-    const resp = await this._client.send(new GetCommand({
-      TableName: this._tableName,
-      Key: { token: `mask-rev:${ptHash}` }
-    }));
-    const item = resp.Item;
-    if (!item) return null;
-    if (now > (item.ttl || 0)) {
-      await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${ptHash}` } }));
+    try {
+      const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
+      const now = Math.floor(Date.now() / 1000);
+      const resp = await this._client.send(new GetCommand({
+        TableName: this._tableName,
+        Key: { token: `mask-rev:${ptHash}` }
+      }));
+      const item = resp.Item;
+      if (!item) return null;
+      if (now > (item.ttl || 0)) {
+        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${ptHash}` } }));
+        return null;
+      }
+      const token = item.ciphertext;
+      return (await this.retrieve(token)) !== null ? token : null;
+    } catch (e: any) {
+      if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`DynamoDB read failed: ${e}`);
       return null;
     }
-    const token = item.ciphertext;
-    return (await this.retrieve(token)) !== null ? token : null;
   }
 
   async retrieve(token: string): Promise<string | null> {
-    const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
-    const now = Math.floor(Date.now() / 1000);
-    const resp = await this._client.send(new GetCommand({
-      TableName: this._tableName,
-      Key: { token: `mask:${token}` }
-    }));
-    const item = resp.Item;
-    if (!item) return null;
-    if (now > (item.ttl || 0)) {
-      const ptHash = item.ptr_hash;
-      if (ptHash) {
-        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${ptHash}` } }));
+    try {
+      const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
+      const now = Math.floor(Date.now() / 1000);
+      const resp = await this._client.send(new GetCommand({
+        TableName: this._tableName,
+        Key: { token: `mask:${token}` }
+      }));
+      const item = resp.Item;
+      if (!item) return null;
+      if (now > (item.ttl || 0)) {
+        const ptHash = item.ptr_hash;
+        if (ptHash) {
+          await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${ptHash}` } }));
+        }
+        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask:${token}` } }));
+        return null;
       }
-      await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask:${token}` } }));
+      return item.ciphertext;
+    } catch (e: any) {
+      if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`DynamoDB read failed: ${e}`);
       return null;
     }
-    return item.ciphertext;
   }
 
   async delete(token: string): Promise<void> {
-    const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
-    const resp = await this._client.send(new GetCommand({
-      TableName: this._tableName,
-      Key: { token: `mask:${token}` }
-    }));
-    const item = resp.Item;
-    if (item && item.ptr_hash) {
-      await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${item.ptr_hash}` } }));
+    try {
+      const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
+      const resp = await this._client.send(new GetCommand({
+        TableName: this._tableName,
+        Key: { token: `mask:${token}` }
+      }));
+      const item = resp.Item;
+      if (item && item.ptr_hash) {
+        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${item.ptr_hash}` } }));
+      }
+      await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask:${token}` } }));
+    } catch (e: any) {
+      if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`DynamoDB delete failed: ${e}`);
     }
-    await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask:${token}` } }));
   }
 }
 
@@ -371,9 +454,7 @@ export class MemcachedVault extends BaseVault {
            await this._client.set(`mask-hash:${token}`, Buffer.from(ptHash), { expires: ttlSeconds });
         }
     } catch (e) {
-        if (_getFailStrategy() === "closed") {
-            throw new MaskVaultConnectionError(`Memcached error: ${e}`);
-        }
+        throw new MaskVaultConnectionError(`Memcached error: ${e}`);
     }
   }
 
@@ -384,6 +465,7 @@ export class MemcachedVault extends BaseVault {
         const token = value.toString();
         return (await this.retrieve(token)) !== null ? token : null;
     } catch (e) {
+        if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`Memcached read failed: ${e}`);
         return null;
     }
   }
@@ -393,6 +475,7 @@ export class MemcachedVault extends BaseVault {
         const { value } = await this._client.get(`mask:${token}`);
         return value ? value.toString() : null;
     } catch (e) {
+        if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`Memcached read failed: ${e}`);
         return null;
     }
   }
@@ -406,7 +489,9 @@ export class MemcachedVault extends BaseVault {
         if (ptHash) {
           await this._client.delete(`mask-rev:${ptHash}`);
         }
-    } catch (e) {}
+    } catch (e) {
+        if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`Memcached delete failed: ${e}`);
+    }
   }
 }
 
@@ -481,7 +566,7 @@ export async function encode(rawText: string, options: EncodeOptions = {}): Prom
   // 3. Encrypt the plaintext before it touches the vault
   const ciphertext = cryptoEngine.encrypt(text);
 
-  // 4. Store with primary reverse lookup hash
+  // 4. Store with primary reverse lookup hash — always fail-shut to prevent PII leakage
   const ttl = options.ttl || DEFAULT_TTL;
   await vault.store(token, ciphertext, ttl, ptHash);
 
@@ -563,18 +648,25 @@ export async function detokenizeText(text: string): Promise<string> {
   }
 
   const tokens = text.match(TOKEN_PATTERN) || [];
-  let result = text;
-  
-  for (const token of tokens) {
+  if (tokens.length === 0) return text;
+
+  // Deduplicate tokens and decode all concurrently
+  const uniqueTokens = [...new Set(tokens)];
+  const decodedPairs = await Promise.all(
+    uniqueTokens.map(async (token): Promise<[string, string]> => {
       const plaintext = await _decodeLenient(token);
-      if (plaintext !== token) {
-        // Use global regex to replace all occurrences of this token
-        // Escape the token to safely use in a regex
-        const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        result = result.replace(new RegExp(escapedToken, 'g'), plaintext);
-      }
+      return [token, plaintext];
+    })
+  );
+
+  let result = text;
+  for (const [token, plaintext] of decodedPairs) {
+    if (plaintext !== token) {
+      const escapedToken = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      result = result.replace(new RegExp(escapedToken, 'g'), plaintext);
+    }
   }
-  
+
   return result;
 }
 

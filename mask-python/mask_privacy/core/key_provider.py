@@ -18,6 +18,7 @@ Usage::
 
 import os
 import logging
+import threading
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -51,7 +52,13 @@ class EnvKeyProvider(BaseKeyProvider):
     """
 
     def get_encryption_key(self) -> Optional[str]:
-        return os.environ.get("MASK_ENCRYPTION_KEY")
+        key = os.environ.get("MASK_ENCRYPTION_KEY")
+        if not key and os.environ.get("MASK_STRICT_PROD") == "true":
+            raise RuntimeError(
+                "MASK_STRICT_PROD is enabled but MASK_ENCRYPTION_KEY is not set. "
+                "The SDK is configured to Fail-Shut when keys are missing in production environments."
+            )
+        return key
 
     def get_master_key(self) -> Optional[str]:
         key = os.environ.get("MASK_MASTER_KEY", "")
@@ -108,7 +115,15 @@ class AwsKmsKeyProvider(BaseKeyProvider):
                 logger.error("AWS KMS envelope decryption failed: %s", e)
                 raise
 
-        # Mode 2: Secret-as-Key fallback
+        # Fail-Shut enforcement: envelope encryption is required if strict mode is enabled or not dev mode
+        if os.environ.get("MASK_STRICT_PROD") == "true" or os.environ.get("MASK_DEV_MODE") != "true":
+            raise RuntimeError(
+                "MASK_ENCRYPTED_KEY is not set. "
+                "Envelope encryption via KMS is required in production environments. "
+                "Set MASK_ENCRYPTED_KEY to a KMS-encrypted data encryption key."
+            )
+
+        # Mode 2: Secret-as-Key fallback (dev mode only)
         try:
             val = self._get_sm().get_secret_value(SecretId=self.key_id)
             return val.get("SecretString")
@@ -178,18 +193,21 @@ class HashiCorpVaultProvider(BaseKeyProvider):
 
 # Singleton accessor
 
+_provider_lock = threading.Lock()
 _provider_instance: Optional[BaseKeyProvider] = None
 
 
 def get_key_provider() -> BaseKeyProvider:
-    """Return the active key provider singleton.
+    """Return the active key provider singleton (lazy-init, thread-safe).
 
     Defaults to ``EnvKeyProvider`` if no custom provider has been set.
     """
     global _provider_instance
     if _provider_instance is None:
-        _provider_instance = EnvKeyProvider()
-        logger.info("Using default EnvKeyProvider for key management.")
+        with _provider_lock:
+            if _provider_instance is None:
+                _provider_instance = EnvKeyProvider()
+                logger.info("Using default EnvKeyProvider for key management.")
     return _provider_instance
 
 

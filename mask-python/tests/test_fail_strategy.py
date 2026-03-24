@@ -5,6 +5,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from mask_privacy.core.exceptions import MaskVaultConnectionError
+from mask_privacy.core.vault import encode, RedisVault
 
 
 class TestFailStrategyClosed:
@@ -13,54 +14,47 @@ class TestFailStrategyClosed:
     def test_redis_vault_raises_on_connection_failure(self):
         """RedisVault.__init__ should raise MaskVaultConnectionError when Redis is unreachable."""
         with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "closed"}):
-            from mask_privacy.core.vault import RedisVault
             with patch("redis.Redis") as mock_redis:
                 mock_redis.from_url.return_value.ping.side_effect = Exception("Connection refused")
                 with pytest.raises(MaskVaultConnectionError):
                     RedisVault()
 
-    def test_dynamodb_atomic_write_raises_when_closed(self):
-        """DynamoDB transact_write_items failure should raise."""
+    def test_encode_raises_when_closed(self):
+        """When fail strategy is closed, encode should raise if vault.store fails."""
         with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "closed"}):
-            from mask_privacy.core.vault import DynamoDBVault
-            with patch("boto3.resource") as mock_resource:
-                mock_db = MagicMock()
-                mock_resource.return_value = mock_db
-                # The client is usually self._dynamodb.meta.client
-                mock_db.meta.client.transact_write_items.side_effect = Exception("Transaction failed")
-                
-                vault = DynamoDBVault()
+            mock_vault = MagicMock()
+            mock_vault.get_token_by_plaintext_hash.return_value = None
+            mock_vault.store.side_effect = MaskVaultConnectionError("Write failed")
+            
+            with patch("mask_privacy.core.vault.get_vault", return_value=mock_vault):
                 with pytest.raises(MaskVaultConnectionError):
-                    vault.store("tok123", "cipher", 600, pt_hash="abc123")
+                    encode("plaintext")
 
 
 class TestFailStrategyOpen:
-    """When MASK_FAIL_STRATEGY=open (default), vault errors should be graceful, except for DynamoDB."""
+    """When MASK_FAIL_STRATEGY=open (default), encode should be graceful and return plaintext."""
 
-    def test_dynamodb_atomic_write_raises_even_when_open(self):
-        """DynamoDB transact_write_items failure should ALWAYS raise to prevent data loss."""
+    def test_vault_store_always_raises(self):
+        """vault.store should ALWAYS raise on failure, regardless of fail strategy."""
         with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "open"}):
-            from mask_privacy.core.vault import DynamoDBVault
-            with patch("boto3.resource") as mock_resource:
-                mock_db = MagicMock()
-                mock_resource.return_value = mock_db
-                mock_db.meta.client.transact_write_items.side_effect = Exception("Transaction failed")
-                
-                vault = DynamoDBVault()
-                with pytest.raises(MaskVaultConnectionError):
-                    vault.store("tok123", "cipher", 600, pt_hash="abc123")
-
-    def test_redis_store_graceful_when_open(self):
-        """Redis store failure should NOT raise when open."""
-        with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "open"}):
-            from mask_privacy.core.vault import RedisVault
             with patch("redis.from_url") as mock_from_url:
                 mock_db = mock_from_url.return_value
                 mock_db.pipeline.return_value.execute.side_effect = Exception("Write failed")
                 
                 vault = RedisVault()
-                # Should NOT raise
-                vault.store("tok123", "cipher", 600, pt_hash="abc123")
+                with pytest.raises(MaskVaultConnectionError):
+                    vault.store("tok123", "cipher", 600, pt_hash="abc123")
+
+    def test_encode_raises_even_when_open(self):
+        """encode() now always fail-shuts to prevent PII leakage, regardless of strategy."""
+        with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "open"}):
+            mock_vault = MagicMock()
+            mock_vault.get_token_by_plaintext_hash.return_value = None
+            mock_vault.store.side_effect = MaskVaultConnectionError("Write failed")
+            
+            with patch("mask_privacy.core.vault.get_vault", return_value=mock_vault):
+                with pytest.raises(MaskVaultConnectionError):
+                    encode("secret text")
 
 
 class TestFailStrategyDefault:

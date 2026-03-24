@@ -64,7 +64,7 @@ describe('TestFailStrategy', () => {
             await expect(vault.store("tok123", "cipher", 600, "abc123")).rejects.toThrow(MaskVaultConnectionError);
         });
 
-        test('test_redis_vault_returns_null_when_open', async () => {
+        test('test_redis_vault_throws_even_when_open', async () => {
            process.env.MASK_FAIL_STRATEGY = "open";
            const vault = new RedisVault();
            const mockRedis = {
@@ -75,8 +75,8 @@ describe('TestFailStrategy', () => {
            };
            (vault as any)._client = mockRedis;
 
-           // Calling store should resolve (silent failure)
-           await expect(vault.store("t", "c", 60, "h")).resolves.toBeUndefined();
+           // store() now always throws on failure as part of the data loss fix.
+           await expect(vault.store("t", "c", 60, "h")).rejects.toThrow(MaskVaultConnectionError);
         });
     });
 

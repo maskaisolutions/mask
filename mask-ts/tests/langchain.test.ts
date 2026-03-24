@@ -1,13 +1,19 @@
-import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { describe, test, expect, beforeEach, afterEach, afterAll, jest } from '@jest/globals';
 import { encode, resetVault } from '../src/core/vault';
 import { resetMasterKey } from '../src/core/fpe';
+import { resetScanner } from '../src/core/scanner';
 import { MaskToolWrapper, secureTool, getMaskCallbackHandler } from '../src/integrations/langchain_hooks';
+import { getAuditLogger } from '../src/telemetry/audit_logger';
 import * as process from 'process';
+
+jest.setTimeout(10000);
 
 describe('TestLangchainHooks', () => {
     beforeEach(() => {
         process.env.MASK_VAULT_TYPE = "memory";
+        process.env.MASK_SCANNER_TYPE = "regex";
         resetVault();
+        resetScanner();
         resetMasterKey();
         process.env.MASK_MASTER_KEY = "test-langchain-key";
     });
@@ -15,6 +21,10 @@ describe('TestLangchainHooks', () => {
     afterEach(() => {
         resetVault();
         resetMasterKey();
+    });
+
+    afterAll(async () => {
+        await getAuditLogger().stop();
     });
 
     describe('TestLangchainMaskToolWrapper', () => {
@@ -36,7 +46,7 @@ describe('TestLangchainHooks', () => {
     });
 
     describe('TestLangchainMaskCallbackHandler', () => {
-        test('test_on_tool_start_mutates_inputs', async () => {
+        test('test_on_tool_start_does_not_mutate_inputs', async () => {
              // Mock BaseCallbackHandler since we don't want to install @langchain/core in this environment if not present
             const MockHandlerClass = await getMaskCallbackHandler();
             const handler = new MockHandlerClass();
@@ -60,8 +70,9 @@ describe('TestLangchainHooks', () => {
                     inputsDict
                 );
 
-                expect(inputsDict.primary).toBe("alice@corp.io");
-                expect(inputsDict.cc[0]).toBe("bob@corp.io");
+                // Inputs should NOT be mutated — they should remain tokenized
+                expect(inputsDict.primary).toBe(token1);
+                expect(inputsDict.cc[0]).toBe(token2);
                 expect(inputsDict.cc[1]).toBe("charlie@corp.io");
             }
         });

@@ -39,22 +39,23 @@ class MaskToolWrapper:
         )
     """
 
-    def __init__(self, func: Any) -> None:
+    def __init__(self, func: Any, client: Any = None) -> None:
         self._func = func
+        self._client = client
         # Preserve metadata for LlamaIndex introspection
         self.__name__ = getattr(func, "__name__", "mask_wrapped")
         self.__doc__ = getattr(func, "__doc__", "")
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         logger.info("[llamaindex pre-hook] decoding tool inputs")
-        decoded_args = tuple(deep_decode(a) for a in args)
-        decoded_kwargs = deep_decode(kwargs)
+        decoded_args = tuple(deep_decode(a, client=self._client) for a in args)
+        decoded_kwargs = deep_decode(kwargs, client=self._client)
 
         result = self._func(*decoded_args, **decoded_kwargs)
 
         logger.info("[llamaindex post-hook] encoding tool outputs")
         if isinstance(result, (str, dict, list)):
-            return deep_encode_pii(result)
+            return deep_encode_pii(result, client=self._client)
         return result
 
 
@@ -71,11 +72,13 @@ try:
             self,
             event_starts_to_ignore: Optional[list] = None,
             event_ends_to_ignore: Optional[list] = None,
+            client: Any = None,
         ) -> None:
             super().__init__(
                 event_starts_to_ignore=event_starts_to_ignore or [],
                 event_ends_to_ignore=event_ends_to_ignore or []
             )
+            self._client = client
 
         def on_event_start(
             self,
@@ -86,7 +89,7 @@ try:
             **kwargs: Any,
         ) -> str:
             if event_type == CBEventType.FUNCTION_CALL and payload:
-                decoded = deep_decode(payload)
+                decoded = deep_decode(payload, client=self._client)
                 payload.update(decoded)
                 logger.info("[llamaindex callback] decoded payload for event %s", event_id)
             return event_id
@@ -99,7 +102,7 @@ try:
             **kwargs: Any,
         ) -> None:
             if event_type == CBEventType.FUNCTION_CALL and payload:
-                encoded = deep_encode_pii(payload)
+                encoded = deep_encode_pii(payload, client=self._client)
                 payload.update(encoded)
                 logger.info("[llamaindex callback] encoded payload for event %s", event_id)
 
@@ -127,12 +130,15 @@ import contextlib
 from unittest.mock import patch
 
 @contextlib.contextmanager
-def mask_llamaindex_hooks():
+def mask_llamaindex_hooks(client: Any = None):
     """Context manager for 'magic' LlamaIndex PII protection.
 
     While active, this hook intercepts all tool calls within LlamaIndex's
     BaseTool class (including FunctionTool) to automatically detokenize
     inputs and re-tokenize outputs.
+
+    Args:
+        client: Optional MaskClient for tenant-isolated operation.
     """
     try:
         from llama_index.core.tools import BaseTool
@@ -145,13 +151,13 @@ def mask_llamaindex_hooks():
     
     def wrapped_call(self, *args, **kwargs):
         # 1. Detokenize inputs
-        decoded_args = tuple(deep_decode(a) for a in args)
-        decoded_kwargs = deep_decode(kwargs)
+        decoded_args = tuple(deep_decode(a, client=client) for a in args)
+        decoded_kwargs = deep_decode(kwargs, client=client)
         # 2. Execute tool
         result = original_call(self, *decoded_args, **decoded_kwargs)
         # 3. Tokenize output
         if isinstance(result, (str, dict, list)):
-            return deep_encode_pii(result)
+            return deep_encode_pii(result, client=client)
         return result
 
     with patch.object(BaseTool, "__call__", wrapped_call):

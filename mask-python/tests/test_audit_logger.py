@@ -41,8 +41,8 @@ class TestAuditLogger:
         """Events are flushed to local logs only (no remote forwarding)."""
         fresh_logger.log("encode", "t1")
         
-        with caplog.at_level(logging.INFO, logger="mask.telemetry"):
+        with caplog.at_level(logging.INFO, logger="mask.audit"):
             fresh_logger._flush()
             
-            # Should emit JSON locally
+            # Should emit JSON via the mask.audit logger
             assert "t1" in caplog.text

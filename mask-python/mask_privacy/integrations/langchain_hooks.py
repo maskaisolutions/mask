@@ -38,6 +38,10 @@ try:
 
         name = "MaskPrivacyHandler"
 
+        def __init__(self, client: Any = None, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self._client = client
+
         def on_tool_start(
             self,
             serialized: Dict[str, Any],
@@ -50,10 +54,13 @@ try:
             inputs: Optional[Dict[str, Any]] = None,
             **kwargs: Any,
         ) -> None:
-            """Detokenise tool inputs before execution."""
+            """Log tool inputs for audit — does NOT mutate the original inputs.
+
+            Actual detokenisation is handled by MaskToolWrapper / @secure_tool.
+            """
             if inputs is not None:
-                decoded = deep_decode(inputs)
-                inputs.update(decoded)
+                # Work on a copy for audit/logging — do NOT mutate the original
+                decoded_copy = deep_decode(dict(inputs), client=self._client)
                 logger.info(
                     "[langchain pre-hook] decoded inputs for %s",
                     serialized.get("name"),
@@ -99,19 +106,20 @@ class MaskToolWrapper:
         )
     """
 
-    def __init__(self, func: Any) -> None:
+    def __init__(self, func: Any, client: Any = None) -> None:
         self._func = func
+        self._client = client
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        decoded_args = tuple(deep_decode(a) for a in args)
-        decoded_kwargs = deep_decode(kwargs)
+        decoded_args = tuple(deep_decode(a, client=self._client) for a in args)
+        decoded_kwargs = deep_decode(kwargs, client=self._client)
         result = self._func(*decoded_args, **decoded_kwargs)
-        return deep_encode_pii(result) if isinstance(result, (str, dict, list)) else result
+        return deep_encode_pii(result, client=self._client) if isinstance(result, (str, dict, list)) else result
 
 
 # @secure_tool decorator — the recommended drop-in replacement
 
-def secure_tool(func=None, *, name: Optional[str] = None, description: Optional[str] = None):
+def secure_tool(func=None, *, name: Optional[str] = None, description: Optional[str] = None, client: Any = None):
     """Drop-in decorator that wraps a function with Mask JIT detokenisation.
 
     Can be used bare or with arguments::
@@ -119,7 +127,7 @@ def secure_tool(func=None, *, name: Optional[str] = None, description: Optional[
         @secure_tool
         def send_email(email: str, body: str) -> str: ...
 
-        @secure_tool(name="lookup_user")
+        @secure_tool(name="lookup_user", client=my_client)
         def find_user(user_id: str) -> dict: ...
 
     The decorated function will:
@@ -129,11 +137,11 @@ def secure_tool(func=None, *, name: Optional[str] = None, description: Optional[
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            decoded_args = tuple(deep_decode(a) for a in args)
-            decoded_kwargs = deep_decode(kwargs)
+            decoded_args = tuple(deep_decode(a, client=client) for a in args)
+            decoded_kwargs = deep_decode(kwargs, client=client)
             result = fn(*decoded_args, **decoded_kwargs)
             if isinstance(result, (str, dict, list)):
-                return deep_encode_pii(result)
+                return deep_encode_pii(result, client=client)
             return result
 
         # Preserve custom name/description for LangChain tool registration

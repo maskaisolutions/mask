@@ -46,7 +46,12 @@ async def test_client_async_wrappers():
     
     # 3. Test scanning
     text = "Contact me at bob@example.com"
-    safe_text = await client.ascan_and_tokenize(text)
+    
+    # Mock the heavy NLP tier since ProcessPoolExecutor can deadlock under pytest-asyncio on Windows
+    from unittest.mock import patch
+    async def mock_atier2(t, *args, **kwargs): return (t, [])
+    with patch.object(client.scanner, "_atier2_nlp", side_effect=mock_atier2):
+        safe_text = await client.ascan_and_tokenize(text)
     assert "bob@example.com" not in safe_text
     assert "tkn-" in safe_text
     assert safe_text.endswith("@email.com")

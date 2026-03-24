@@ -35,6 +35,13 @@ def _fresh_vault():
 
 
 class TestLlamaindexMaskToolWrapper:
+    @pytest.fixture(autouse=True)
+    def _mock_nlp(self):
+        # Mock the heavy NLP tier since ProcessPoolExecutor can deadlock or timeout on Windows in tests
+        from unittest.mock import patch
+        from mask_privacy.core.scanner import PresidioScanner
+        with patch.object(PresidioScanner, "_tier2_nlp", side_effect=lambda t, *args, **kwargs: (t, [])):
+            yield
 
     def test_wrapper_detokenizes_inputs_and_tokenizes_outputs(self):
         token = encode("admin@hospital.com")
@@ -52,6 +59,13 @@ class TestLlamaindexMaskToolWrapper:
 
 
 class TestLlamaindexMaskCallbackHandler:
+    @pytest.fixture(autouse=True)
+    def _mock_nlp(self):
+        # Mock the heavy NLP tier since ProcessPoolExecutor can deadlock or timeout on Windows in tests
+        from unittest.mock import patch
+        from mask_privacy.core.scanner import PresidioScanner
+        with patch.object(PresidioScanner, "_tier2_nlp", side_effect=lambda t, *args, **kwargs: (t, [])):
+            yield
 
     def test_on_event_start_and_end_mutates_payload(self):
         handler = MaskCallbackHandler()
@@ -80,6 +94,13 @@ class TestLlamaindexMaskCallbackHandler:
 
 
 class TestLlamaindexMagicHooks:
+    @pytest.fixture(autouse=True)
+    def _mock_nlp(self):
+        # Mock the heavy NLP tier since ProcessPoolExecutor can deadlock or timeout on Windows in tests
+        from unittest.mock import patch
+        from mask_privacy.core.scanner import PresidioScanner
+        with patch.object(PresidioScanner, "_tier2_nlp", side_effect=lambda t, *args, **kwargs: (t, [])):
+            yield
 
     def test_mask_llamaindex_hooks_patches_basetool(self):
         from llama_index.core.tools import FunctionTool

@@ -12,11 +12,15 @@ describe('Security Hardening Verification', () => {
     process.env = originalEnv;
   });
 
-  test('verification: fail-shut security enforcement in production mode', async () => {
-    process.env.MASK_STRICT_PROD = 'true';
+  test('verification: fail-shut security enforcement in production mode (default)', async () => {
+    // Non-dev mode (default) — decryption failure should raise
+    delete process.env.MASK_DEV_MODE;
+    process.env.MASK_ENCRYPTION_KEY = "test-key";
+    const { CryptoEngine } = require('../src/core/crypto');
+    await CryptoEngine.getInstanceAsync();
+    
     const client = new MaskClient();
 
-    // Mock retrieve to return ciphertext
     // @ts-ignore
     jest.spyOn(client.vault, 'retrieve').mockResolvedValue('cipher');
     // @ts-ignore
@@ -24,11 +28,14 @@ describe('Security Hardening Verification', () => {
       throw new Error("Decryption failed");
     });
 
-    await expect(async () => await client.decode("MASK-123")).rejects.toThrow("Decryption failed");
+    await expect(async () => await client.decode("MASK-123")).rejects.toThrow("Failed to decrypt token payload");
   });
 
-  test('verification: fail-open (legacy) in development mode', async () => {
-    process.env.MASK_STRICT_PROD = 'false';
+  test('verification: fail-open in dev mode', async () => {
+    process.env.MASK_DEV_MODE = 'true';
+    const { CryptoEngine } = require('../src/core/crypto');
+    await CryptoEngine.getInstanceAsync();
+    
     const client = new MaskClient();
     const token = "MASK-123";
 

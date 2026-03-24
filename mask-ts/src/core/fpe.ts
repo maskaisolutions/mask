@@ -28,13 +28,13 @@ async function _getMasterKey(): Promise<Buffer> {
     }
 
     if (!raw) {
-      if (process.env.MASK_ALLOW_INSECURE_KEYS === "true") {
+      if (process.env.MASK_DEV_MODE === "true") {
         // Auto-generate a session-local key (non-persistent)
         raw = crypto.randomBytes(32).toString('hex');
         process.env.MASK_MASTER_KEY = raw;
       } else {
         throw new MaskSecurityError(
-          "MASK_MASTER_KEY not set. Set it or use MASK_ALLOW_INSECURE_KEYS=true for dev."
+          "MASK_MASTER_KEY not set. Set it or use MASK_DEV_MODE=true for dev."
         );
       }
     }

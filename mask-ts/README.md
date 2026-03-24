@@ -27,9 +27,9 @@ Instead of trusting the LLM to safeguard plain-text data, the system strictly en
 
 This guarantees that the LLM can orchestrate workflows involving sensitive data without ever actually exposing the raw data to the model or its remote provider logs. 
 
-Additionally, we solve two critical sub-issues to make this enterprise-ready:
-1. **The Statefulness Trap**: Traditional "vaults" break down in multi-node Kubernetes environments. We support pluggable distributed vaults (Redis, DynamoDB, Memcached) so detokenization state is instantly shared across all your horizontally scaled pods.
-2. **The Schema Trap**: Strict downstream tools will crash if handed a random token. We use Format-Preserving Tokenization backed by an encrypted vault to generate tokens that retain the exact format of the original data (Emails, US Phones, SSNs, 16-digit Credit Cards, 9-digit Routing Numbers). Tokens look like real data; the real values are stored encrypted and retrieved via the vault.
+Additionally, the SDK addresses two technical considerations for production use:
+1. **Distributed State Management**: Traditional "vaults" may lose state in multi-node environments. Pluggable backends (Redis, DynamoDB, Memcached) ensure detokenization state is shared across all pods.
+2. **Schema Compatibility**: Downstream tools frequently require specific formats. Format-Preserving Tokenization (Emails, US Phones, SSNs, etc.) generates tokens that retain the format of original data.
 
 ### How We Handle Data (Local-First by Default)
 
@@ -79,18 +79,19 @@ const client = new MaskClient({
 const safeToken = await client.encode("user@tenant.com");
 ```
 
-### 3. Heuristic Safety mathematically guaranteed
-It is catastrophic if an SDK misidentifies a user's *real* SSN as a "token" and accidentally passes it in plaintext to an LLM. Mask's `looksLikeToken()` heuristic algorithm strictly uses universally invalid prefixes. 
-* SSN tokens always begin with `000` (The Social Security Administration has never issued an Area Number of 000).
+### 3. Collision Avoidance
+Mask prevents the misidentification of real data as tokens by using universally invalid prefixes for token generation:
+* SSN tokens always begin with `000` (The Social Security Administration does not issue Area Numbers of 000).
 * Routing tokens always begin with `0000` (The Federal Reserve valid range starts at 01).
 * Credit Card tokens use the `4000-0000-0000` Visa reserved test BIN. 
-By generating statistically impossible tokens, Mask guarantees it will never accidentally swallow real PII.
+
+This prefix-based approach ensures that the SDK does not inadvertently process valid PII as an existing token.
 
 ### 4. Enterprise Async Support
 Mask is built from the ground up for high-concurrency Node.js environments. All core operations are asynchronous and promised-based. Calling `encode()`, `decode()`, or `scanAndTokenize()` allows your event loop to remain unblocked while handling PII tokenization tasks.
 
 ### 5. Pluggable Key Management (Enterprise KMS)
-For zero-trust environments, `MASK_ENCRYPTION_KEY` no longer needs to live in a static environment variable. Mask supports a pluggable `BaseKeyProvider` architecture that allows you to fetch secrets dynamically from dedicated Key Management Services.
+For zero-trust environments, `MASK_ENCRYPTION_KEY` can be managed outside of static environment variables. Mask supports a pluggable `BaseKeyProvider` architecture that allows you to fetch secrets dynamically from dedicated Key Management Services.
 
 #### Supported Providers
 *   **EnvKeyProvider (Default)**: Reads from `MASK_ENCRYPTION_KEY` and `MASK_MASTER_KEY`.
@@ -98,9 +99,8 @@ For zero-trust environments, `MASK_ENCRYPTION_KEY` no longer needs to live in a 
 *   **AzureKeyVaultProvider (Stub)**: Placeholder for Azure Key Vault. Requires implementation of `@azure/keyvault-keys`.
 *   **HashiCorpVaultProvider (Stub)**: Placeholder for HashiCorp Vault.
 
-> [!IMPORTANT]
-> **Production Security (Fail-Shut)**:
-> All KMS stub providers are designed to **Fail-Shut**. If you attempt to use a stub provider that is not yet fully implemented, the SDK will throw an `Error` instead of falling back to insecure defaults. This guarantees that you never accidentally encrypt data with a weak or auto-generated key when you intended to use a KMS.
+> [!NOTE]
+> All KMS stub providers are designed for **Fail-Shut** operation. If you attempt to use a stub provider that is not yet implemented, the SDK will throw an `Error` rather than fall back to insecure defaults.
 
 #### Example: Implementing a Custom Provider
 If you need to support a specific KMS today, you can easily implement the `BaseKeyProvider` interface:
@@ -122,7 +122,7 @@ setKeyProvider(new MyCustomKmsProvider());
 ```
 
 ### 6. Local NLP Scanning (Default)
-Performance-sensitive deployments now utilize the built-in `LocalTransformersScanner` by default. This uses HuggingFace Transformers to run PII detection locally within your Node.js process, eliminating the need for external NLP services.
+Performance-sensitive deployments utilize the built-in `LocalTransformersScanner` by default. This uses HuggingFace Transformers to run PII detection locally within your Node.js process, eliminating the need for external NLP services.
 
 ### 7. Sub-string Detokenization
 Mask includes the ability to detokenize PII embedded within larger text blocks (like email bodies or chat messages). `detokenizeText()` uses high-performance regex to find and restore all tokens within a paragraph before they hit your tools.
@@ -184,6 +184,15 @@ export MASK_MEMCACHED_PORT=11211
 #### 4. Security Enforcement
 # Enable strict mode to refuse startup without MASK_ENCRYPTION_KEY
 export MASK_STRICT_PROD=true
+
+# Configure Blind Index Salt (Optional)
+export MASK_BLIND_INDEX_SALT="custom-salt-here"
+
+> [!IMPORTANT]
+> **Security Warning:** In production, you **must** change the default `MASK_BLIND_INDEX_SALT`. Using the default salt makes your blind indices vulnerable to pre-computed hash (rainbow table) attacks across different SDK installations.
+
+# Configure MemoryVault cleanup aggressiveness (default: 0.01)
+export MASK_VAULT_CLEANUP_FREQUENCY=0.05
 ```
 
 ---

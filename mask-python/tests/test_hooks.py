@@ -60,6 +60,14 @@ class TestDeepDecode:
 
 
 class TestDeepEncodeEmails:
+    @pytest.fixture(autouse=True)
+    def _mock_nlp(self):
+        # Mock the heavy NLP tier since ProcessPoolExecutor can deadlock or timeout on Windows in tests
+        from unittest.mock import patch
+        from mask_privacy.core.scanner import PresidioScanner
+        with patch.object(PresidioScanner, "_tier2_nlp", side_effect=lambda t, *args, **kwargs: (t, [])):
+            yield
+
     def test_encodes_raw_email(self):
         result = _deep_encode_pii({"email": "test@example.com"})
         assert looks_like_token(result["email"])
@@ -81,6 +89,14 @@ class TestDecryptBeforeTool:
 
 
 class TestEncryptAfterTool:
+    @pytest.fixture(autouse=True)
+    def _mock_nlp(self):
+        # Mock the heavy NLP tier since ProcessPoolExecutor can deadlock or timeout on Windows in tests
+        from unittest.mock import patch
+        from mask_privacy.core.scanner import PresidioScanner
+        with patch.object(PresidioScanner, "_tier2_nlp", side_effect=lambda t, *args, **kwargs: (t, [])):
+            yield
+
     def test_encodes_leaked_emails_in_args(self):
         args = {"email": "leaked@plain.com"}
         encrypt_after_tool(_FakeTool(), args, _FakeCtx(), {})

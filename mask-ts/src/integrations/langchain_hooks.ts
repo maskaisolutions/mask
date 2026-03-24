@@ -17,16 +17,18 @@ const logger = getLogger('mask.integrations.langchain');
  */
 export class MaskToolWrapper {
   private _func: Function;
+  private _client?: any;
 
-  constructor(func: Function) {
+  constructor(func: Function, client?: any) {
     this._func = func;
+    this._client = client;
   }
 
   async run(...args: any[]): Promise<any> {
-    const decodedArgs = await Promise.all(args.map(a => deepDecode(a)));
+    const decodedArgs = await Promise.all(args.map(a => deepDecode(a, this._client)));
     const result = await this._func(...decodedArgs);
     if (typeof result === 'string' || typeof result === 'object') {
-        return await deepEncodePII(result);
+        return await deepEncodePII(result, this._client);
     }
     return result;
   }
@@ -38,12 +40,12 @@ export class MaskToolWrapper {
  * Usage:
  *    const myTool = secureTool((arg1, arg2) => { ... });
  */
-export function secureTool(func: Function, options: { name?: string, description?: string } = {}): any {
+export function secureTool(func: Function, options: { name?: string, description?: string, client?: any } = {}): any {
   const wrapper = async (...args: any[]) => {
-    const decodedArgs = await Promise.all(args.map(a => deepDecode(a)));
+    const decodedArgs = await Promise.all(args.map(a => deepDecode(a, options.client)));
     const result = await func(...decodedArgs);
     if (typeof result === 'string' || typeof result === 'object') {
-        return await deepEncodePII(result);
+        return await deepEncodePII(result, options.client);
     }
     return result;
   };
@@ -61,7 +63,7 @@ export function secureTool(func: Function, options: { name?: string, description
 /**
  * LangChain callback handler.
  */
-export async function getMaskCallbackHandler() {
+export async function getMaskCallbackHandler(client?: any) {
     try {
         const { BaseCallbackHandler } = require('@langchain/core/callbacks/base');
 
@@ -70,9 +72,8 @@ export async function getMaskCallbackHandler() {
 
             async handleToolStart(tool: any, input: string, runId: string, parentRunId?: string, tags?: string[], metadata?: Record<string, any>, inputs?: Record<string, any>): Promise<void> {
                 if (inputs) {
-                    logger.info(`[pre-hook] decoding tool inputs for run ${runId}`);
-                    const decoded = await deepDecode(inputs);
-                    Object.assign(inputs, decoded);
+                    const decodedCopy = await deepDecode({ ...inputs }, client);
+                    logger.info(`[pre-hook] decoded tool inputs for run ${runId}`);
                 }
             }
 

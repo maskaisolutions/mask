@@ -5,19 +5,31 @@
  * ensuring that plaintext PII is encrypted locally before being
  * transmitted and stored in distributed vaults (Redis/Memcached/DynamoDB).
  *
+ * Uses AES-256-GCM (authenticated encryption) via native Node.js crypto.
+ * Includes a compatibility layer to decrypt legacy Fernet-format tokens.
+ *
  * Requires MASK_ENCRYPTION_KEY to be set in the environment.
  */
 
 import * as process from 'process';
+import * as cryptoNode from 'crypto';
 import { getKeyProvider } from './key_provider';
-
-const fernet = require('fernet');
-const cryptoNode = require('crypto');
 import { MaskDecryptionError } from './exceptions';
+
+// ---------------------------------------------------------------------------
+// AES-256-GCM constants
+// ---------------------------------------------------------------------------
+const AES_KEY_BYTES = 32;        // 256 bits
+const GCM_IV_BYTES = 12;         // 96-bit nonce (NIST recommended for GCM)
+const GCM_AUTH_TAG_BYTES = 16;   // 128-bit auth tag
+const GCM_ALGORITHM = 'aes-256-gcm';
+
+// Prefix for new AES-GCM tokens to distinguish from legacy Fernet
+const AES_GCM_PREFIX = 'aes:';
 
 export class CryptoEngine {
   private static _instance: CryptoEngine | null = null;
-  private _fernet: any;
+  private _aesKey: Buffer | null = null;
   private _indexSecret: Buffer | null = null;
 
   private constructor() {}
@@ -49,7 +61,7 @@ export class CryptoEngine {
 
   private async _init(): Promise<void> {
     /**
-     * Initialize the underlying Fernet engine.
+     * Initialize the AES-256-GCM engine.
      *
      * The encryption key is retrieved from the active KeyProvider.
      * If no key is available, a throwaway key is auto-generated for
@@ -60,35 +72,33 @@ export class CryptoEngine {
     
     let key: string;
     if (!keyFromProvider) {
-      if (process.env.MASK_STRICT_PROD === 'true') {
+      if (process.env.MASK_DEV_MODE === 'true') {
+        key = cryptoNode.randomBytes(32).toString('base64');
+        process.env.MASK_ENCRYPTION_KEY = key;
+        console.warn(
+          "MASK_DEV_MODE is enabled. Using a generated throwaway key. " +
+          "DO NOT USE THIS IN PRODUCTION — tokens will be lost on restart."
+        );
+      } else {
         throw new Error(
-          'MASK_STRICT_PROD is enabled but MASK_ENCRYPTION_KEY is not set. ' +
-          'Refusing to start with an auto-generated key in production mode.'
+          'MASK_ENCRYPTION_KEY is not set. Set MASK_ENCRYPTION_KEY to a valid ' +
+          'encryption key, or set MASK_DEV_MODE=true to use an ephemeral throwaway key.'
         );
       }
-      key = cryptoNode.randomBytes(32).toString('base64');
-      process.env.MASK_ENCRYPTION_KEY = key;
-      console.warn(
-        "MASK_ENCRYPTION_KEY not set. Using a generated throwaway key. DO NOT USE THIS IN PRODUCTION."
-      );
     } else {
       key = keyFromProvider;
     }
 
-    try {
-      // fernet Secret expects a base64 encoded string
-      this._fernet = new fernet.Secret(key);
-    } catch (e) {
-      throw new Error(
-        "Invalid MASK_ENCRYPTION_KEY. Must be a valid url-safe base64-encoded " +
-        "Fernet key."
-      );
-    }
+    // Derive a 32-byte AES key from the provided key material.
+    // This normalises any key format (Fernet base64, raw base64, etc.)
+    // into a consistent 32-byte key via SHA-256 derivation.
+    this._aesKey = cryptoNode.createHash('sha256').update(key).digest();
 
     // Derive a separate secret for blind indexing (HMAC-SHA256)
     // We derive it from the master encryption key so we don't need a 3rd env var.
     const masterKey = await provider.getMasterKey() || key;
-    this._indexSecret = cryptoNode.createHmac('sha256', masterKey).update("mask-blind-index").digest();
+    const salt = process.env.MASK_BLIND_INDEX_SALT || "mask-blind-index";
+    this._indexSecret = cryptoNode.createHmac('sha256', masterKey).update(salt).digest();
   }
 
   /** Return the secret used for HMAC-based blind indexing. */
@@ -100,26 +110,99 @@ export class CryptoEngine {
   }
 
   public encrypt(plaintext: string): string {
-    /** Encrypt plaintext into a url-safe base64 string. */
-    const token = new fernet.Token({
-      secret: this._fernet,
-      iv: Array.from(cryptoNode.randomBytes(16)) // use real randomness
-    });
-    return token.encode(plaintext);
+    /** Encrypt plaintext using AES-256-GCM. Returns prefixed base64 string. */
+    if (!this._aesKey) {
+      throw new Error("CryptoEngine not initialised. AES key missing.");
+    }
+
+    const iv = cryptoNode.randomBytes(GCM_IV_BYTES);
+    const cipher = cryptoNode.createCipheriv(GCM_ALGORITHM, this._aesKey, iv);
+    
+    const encrypted = Buffer.concat([
+      cipher.update(plaintext, 'utf8'),
+      cipher.final()
+    ]);
+    const authTag = cipher.getAuthTag();
+
+    // Wire format: iv (12) + authTag (16) + ciphertext (variable)
+    const combined = Buffer.concat([iv, authTag, encrypted]);
+    return AES_GCM_PREFIX + combined.toString('base64');
   }
 
   public decrypt(ciphertext: string): string {
-    /** Decrypt url-safe base64 ciphertext back to plaintext. */
+    /** Decrypt ciphertext. Supports both new AES-GCM and legacy Fernet formats. */
+    if (!this._aesKey) {
+      throw new Error("CryptoEngine not initialised. AES key missing.");
+    }
+
     try {
-      const token = new fernet.Token({
-        secret: this._fernet,
-        token: ciphertext,
-        ttl: 0 // No TTL check by default to match Python's Fernet default
-      });
-      return token.decode();
+      if (ciphertext.startsWith(AES_GCM_PREFIX)) {
+        return this._decryptAesGcm(ciphertext.slice(AES_GCM_PREFIX.length));
+      }
+
+      // Legacy path: attempt Fernet-format decryption
+      return this._decryptLegacyFernet(ciphertext);
     } catch (e) {
       console.error("Failed to decrypt vault payload. Check your MASK_ENCRYPTION_KEY. Inner error:", e);
       throw new MaskDecryptionError("Decryption failed");
+    }
+  }
+
+  /** Decrypt an AES-256-GCM token (base64 encoded). */
+  private _decryptAesGcm(b64: string): string {
+    const combined = Buffer.from(b64, 'base64');
+    if (combined.length < GCM_IV_BYTES + GCM_AUTH_TAG_BYTES) {
+      throw new Error("Ciphertext too short for AES-GCM");
+    }
+
+    const iv = combined.subarray(0, GCM_IV_BYTES);
+    const authTag = combined.subarray(GCM_IV_BYTES, GCM_IV_BYTES + GCM_AUTH_TAG_BYTES);
+    const encrypted = combined.subarray(GCM_IV_BYTES + GCM_AUTH_TAG_BYTES);
+
+    const decipher = cryptoNode.createDecipheriv(GCM_ALGORITHM, this._aesKey!, iv);
+    decipher.setAuthTag(authTag);
+
+    const decrypted = Buffer.concat([
+      decipher.update(encrypted),
+      decipher.final()
+    ]);
+
+    return decrypted.toString('utf8');
+  }
+
+  /**
+   * Attempt to decrypt a legacy Fernet-format token.
+   *
+   * Fernet format: Version (1) || Timestamp (8) || IV (16) || Ciphertext (var) || HMAC (32)
+   * All base64url-encoded.
+   *
+   * We try to use the `fernet` npm package if available, otherwise throw.
+   */
+  private _decryptLegacyFernet(ciphertext: string): string {
+    let fernet: any;
+    try {
+      fernet = require('fernet');
+    } catch (e) {
+      throw new MaskDecryptionError(
+        "Missing required optional dependency 'fernet' for legacy token decryption. " +
+        "Please run 'npm install fernet' to support legacy tokens."
+      );
+    }
+
+    try {
+      // Reconstruct the original Fernet key from our AES key
+      // This won't work if the key was derived differently, but it's a best-effort compat layer
+      const token = new fernet.Token({
+        secret: new fernet.Secret(process.env.MASK_ENCRYPTION_KEY || ''),
+        token: ciphertext,
+        ttl: 0
+      });
+      return token.decode();
+    } catch (e) {
+      // If decryption fails, throw to caller
+      throw new MaskDecryptionError(
+        "Failed to decrypt legacy Fernet token. The key may have changed or the token is corrupt."
+      );
     }
   }
 }

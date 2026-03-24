@@ -16,15 +16,15 @@ from mask_privacy.core.scanner import get_scanner
 
 MAX_DEPTH = 100
 
-def deep_decode(obj: Any) -> Any:
+def deep_decode(obj: Any, client: Optional[Any] = None) -> Any:
     """Walk *obj* iteratively and detokenise all Mask tokens found."""
-    return _deep_walk_iterative(obj, 'decode')
+    return _deep_walk_iterative(obj, 'decode', client)
 
-def deep_encode_pii(obj: Any) -> Any:
+def deep_encode_pii(obj: Any, client: Optional[Any] = None) -> Any:
     """Walk *obj* and tokenise PII using the configured scanner."""
-    return _deep_walk_iterative(obj, 'encode')
+    return _deep_walk_iterative(obj, 'encode', client)
 
-def _deep_walk_iterative(root: Any, op: str) -> Any:
+def _deep_walk_iterative(root: Any, op: str, client: Optional[Any] = None) -> Any:
     """Internal iterative walker to prevent stack overflow and ensure non-mutation."""
     if root is None or (not isinstance(root, (str, dict, list, tuple)) and not _is_pydantic(root)):
         return root
@@ -38,10 +38,10 @@ def _deep_walk_iterative(root: Any, op: str) -> Any:
     # Top-level string optimization
     if isinstance(root, str):
         if op == 'decode':
-            return detokenize_text(root)
+            return client.detokenize_text(root) if client else detokenize_text(root)
         if looks_like_token(root):
             return root
-        return get_scanner().scan_and_tokenize(root)
+        return client.scan_and_tokenize(root) if client else get_scanner().scan_and_tokenize(root)
 
     # Rebuild the structure iteratively
     # result_holder acts as a root container to safely handle the root result.
@@ -61,9 +61,9 @@ def _deep_walk_iterative(root: Any, op: str) -> Any:
 
         if isinstance(source, str):
             if op == 'decode':
-                target[key] = detokenize_text(source)
+                target[key] = client.detokenize_text(source) if client else detokenize_text(source)
             else:
-                target[key] = source if looks_like_token(source) else get_scanner().scan_and_tokenize(source)
+                target[key] = source if looks_like_token(source) else (client.scan_and_tokenize(source) if client else get_scanner().scan_and_tokenize(source))
         
         elif isinstance(source, dict):
             new_dict: Dict[Any, Any] = {}
@@ -86,18 +86,39 @@ def _deep_walk_iterative(root: Any, op: str) -> Any:
             for field_name in fields:
                 v = getattr(source, field_name, None)
                 stack.append((v, new_dict, field_name, depth + 1))
-            post_process_tasks.append((new_dict, source.__class__, target, key))
+            post_process_tasks.append((new_dict, source, target, key))
+        
+        elif hasattr(source, "__dict__") or hasattr(source, "__slots__"):
+            # Generic object / DataClass / Bunch
+            new_dict = {}
+            target[key] = new_dict
+            items = []
+            if hasattr(source, "__dict__"):
+                items.extend(vars(source).items())
+            if hasattr(source, "__slots__"):
+                for s in source.__slots__:
+                    if hasattr(source, s):
+                        items.append((s, getattr(source, s)))
+            
+            for k, v in items:
+                stack.append((v, new_dict, k, depth + 1))
+            post_process_tasks.append((new_dict, source, target, key))
         
         else:
             target[key] = source
 
     # Process tasks in reverse order (bottom-up)
-    for container, original_type, parent, key in reversed(post_process_tasks):
-        if original_type is tuple:
+    for container, original, parent, key in reversed(post_process_tasks):
+        if original is tuple:
             parent[key] = tuple(container)
+        elif _is_pydantic(original):
+            # Reconstruct Pydantic safely
+            parent[key] = original.__class__(**container)
         else:
-            # original_type is a Pydantic model class
-            parent[key] = original_type(**container)
+            # For generic objects, we return the sanitized dict representation.
+            # This is safer for LLM consumption than the raw object which might
+            # contain PII in its __repr__ or __str__.
+            parent[key] = container
 
     return result_holder[0]
 

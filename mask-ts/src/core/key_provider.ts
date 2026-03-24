@@ -47,8 +47,8 @@ export class EnvKeyProvider extends BaseKeyProvider {
     const key = process.env.MASK_ENCRYPTION_KEY || null;
     if (!key && process.env.MASK_STRICT_PROD === 'true') {
       throw new Error(
-        'MASK_STRICT_PROD is enabled but MASK_ENCRYPTION_KEY is not set. ' +
-        'Refusing to start with an auto-generated key in production mode.'
+        "MASK_STRICT_PROD is enabled but MASK_ENCRYPTION_KEY is not set. " +
+        "The SDK is configured to fail-shut when keys are missing in production environments."
       );
     }
     return key;
@@ -58,12 +58,6 @@ export class EnvKeyProvider extends BaseKeyProvider {
     let key = process.env.MASK_MASTER_KEY || "";
     if (!key) {
       key = process.env.MASK_ENCRYPTION_KEY || "";
-    }
-    if (!key && process.env.MASK_STRICT_PROD === 'true') {
-      throw new Error(
-        'MASK_STRICT_PROD is enabled but MASK_MASTER_KEY is not set. ' +
-        'Refusing to start with an auto-generated key in production mode.'
-      );
     }
     return key || null;
   }
@@ -75,21 +69,66 @@ export class EnvKeyProvider extends BaseKeyProvider {
  * Requires ``@aws-sdk/client-kms`` and ``@aws-sdk/client-secrets-manager``.
  */
 export class AwsKmsKeyProvider extends BaseKeyProvider {
-  private _client: any = null;
+  private _secretsClient: any = null;
+  private _kmsClient: any = null;
 
   constructor(public readonly keyId: string, public readonly region: string = "us-east-1") {
     super();
   }
 
   private async _getSecretsClient() {
-    if (!this._client) {
+    if (!this._secretsClient) {
       const { SecretsManagerClient } = require("@aws-sdk/client-secrets-manager");
-      this._client = new SecretsManagerClient({ region: this.region });
+      this._secretsClient = new SecretsManagerClient({ region: this.region });
     }
-    return this._client;
+    return this._secretsClient;
   }
 
+  private async _getKmsClient() {
+    if (!this._kmsClient) {
+      const { KMSClient } = require("@aws-sdk/client-kms");
+      this._kmsClient = new KMSClient({ region: this.region });
+    }
+    return this._kmsClient;
+  }
+
+  /**
+   * Envelope Encryption flow:
+   * 1. If MASK_ENCRYPTED_KEY is set, use KMS to decrypt it (envelope encryption).
+   * 2. Otherwise, fall back to fetching the raw key from Secrets Manager.
+   * 3. If MASK_STRICT_PROD is set, envelope encryption is required.
+   */
   async getEncryptionKey(): Promise<string | null> {
+    // Envelope encryption path: decrypt a wrapped DEK via KMS
+    const encryptedKey = process.env.MASK_ENCRYPTED_KEY;
+    if (encryptedKey) {
+      try {
+        const { DecryptCommand } = require("@aws-sdk/client-kms");
+        const kms = await this._getKmsClient();
+        const response = await kms.send(new DecryptCommand({
+          CiphertextBlob: Buffer.from(encryptedKey, 'base64'),
+          KeyId: this.keyId,
+        }));
+        if (response.Plaintext) {
+          return Buffer.from(response.Plaintext).toString('base64');
+        }
+        throw new Error("KMS DecryptCommand returned empty Plaintext.");
+      } catch (e) {
+        console.error("AWS KMS envelope decryption failed:", e);
+        throw e;
+      }
+    }
+
+    // In strict production mode or non-dev mode, envelope encryption is required
+    if (process.env.MASK_STRICT_PROD === 'true' || process.env.MASK_DEV_MODE !== 'true') {
+      throw new Error(
+        'MASK_ENCRYPTED_KEY is not set. ' +
+        'Envelope encryption via KMS is required in production modes. ' +
+        'Set MASK_ENCRYPTED_KEY to a KMS-encrypted data encryption key.'
+      );
+    }
+
+    // Fallback: raw key from Secrets Manager
     try {
       const { GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
       const client = await this._getSecretsClient();

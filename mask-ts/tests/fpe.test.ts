@@ -7,7 +7,7 @@ import * as process from 'process';
 describe('TestFPETokenGeneration', () => {
   beforeEach(() => {
     resetMasterKey();
-    process.env.MASK_ALLOW_INSECURE_KEYS = "true";
+    process.env.MASK_DEV_MODE = "true";
     process.env.MASK_MASTER_KEY = "test-key-for-deterministic-fpe";
   });
 
@@ -92,7 +92,7 @@ describe('TestFPETokenGeneration', () => {
     resetMasterKey();
     delete process.env.MASK_MASTER_KEY;
     delete process.env.MASK_ENCRYPTION_KEY;
-    delete process.env.MASK_ALLOW_INSECURE_KEYS;
+    delete process.env.MASK_DEV_MODE;
     
     await expect(generateFPEToken("private@data.io")).rejects.toThrow(MaskSecurityError);
   });

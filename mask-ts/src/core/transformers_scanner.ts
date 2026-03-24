@@ -1,42 +1,69 @@
 /**
  * Local Transformers-based NER Scanner for Mask SDK.
  * 
- * Uses @huggingface/transformers to provide state-of-the-art PII detection
- * (Names, Locations, Organizations) entirely on the local machine via ONNX Runtime.
+ * Uses @huggingface/transformers via a Piscina worker pool to provide
+ * state-of-the-art PII detection (Names, Locations, Organizations) entirely
+ * on the local machine via ONNX Runtime — without blocking the Node.js event loop.
  */
 
 import { BaseScanner } from './scanner';
-import { pipeline } from '@huggingface/transformers';
 import { looksLikeToken } from './fpe';
 import { withTimeout } from './timeout';
 import { MaskNLPTimeout } from './exceptions';
+import * as path from 'path';
+import * as os from 'os';
+
+let Piscina: any;
+try {
+  Piscina = require('piscina');
+} catch {
+  // Will be caught at initialization time with a clear error
+}
 
 export class LocalTransformersScanner extends BaseScanner {
-  private _pipeline: any = null;
+  private _pool: any = null;
   private _modelName: string;
+  private _warmupPromise: Promise<void> | null = null;
 
   constructor(modelName: string = 'Xenova/distilbert-base-uncased-ner-simple') {
     super();
     this._modelName = modelName;
+    // Eagerly start the worker pool and pre-warm the model
+    this._warmupPromise = this._initPool();
   }
 
   /**
-   * Initialize the Transformers pipeline.
-   * This will download the model on the first run (cached thereafter).
+   * Initialize the Piscina worker pool and pre-warm the ONNX model.
+   * The model is loaded eagerly at construction time to avoid P99 latency
+   * spikes on the first user request.
    */
-  private async _initPipeline() {
-    if (!this._pipeline) {
-      console.info(`Initializing local NLP model: ${this._modelName}...`);
-      this._pipeline = await pipeline('ner', this._modelName, {
-        progress_callback: (info: any) => {
-          if (info.status === 'progress') {
-            const pct = info.progress ? info.progress.toFixed(2) : '...';
-            console.info(`[NLP Model] Downloading ${info.file || 'model'}: ${pct}%`);
-          } else if (info.status === 'ready') {
-            console.info(`[NLP Model] ${info.file || 'Component'} is ready.`);
-          }
-        }
+  private async _initPool(): Promise<void> {
+    if (!Piscina) {
+      throw new Error(
+        "Missing required dependency 'piscina'. " +
+        "Please run 'npm install piscina' to use the LocalTransformersScanner."
+      );
+    }
+
+    if (!this._pool) {
+      const workerPath = path.resolve(__dirname, 'nlp_worker.js');
+      const maxThreads = Math.max(1, Math.min(os.cpus().length - 1, 4));
+
+      this._pool = new Piscina({
+        filename: workerPath,
+        maxThreads,
+        minThreads: 1,
       });
+
+      // Pre-warm: run a dummy inference to force model download/load
+      const cacheDir = process.env.MASK_MODEL_CACHE_DIR;
+      console.info(`[NLP Pool] Pre-warming ${maxThreads} worker(s) with model: ${this._modelName}${cacheDir ? ` (cache: ${cacheDir})` : ''}`);
+      try {
+        await this._pool.run({ text: 'warmup', modelName: this._modelName, cacheDir });
+        console.info('[NLP Pool] Pre-warm complete. Workers are ready.');
+      } catch (e) {
+        console.warn(`[NLP Pool] Pre-warm failed (will retry on first real request): ${e}`);
+      }
     }
   }
 
@@ -63,13 +90,20 @@ export class LocalTransformersScanner extends BaseScanner {
   ): Promise<[string, any[]]> {
     if (!text || text.trim().length === 0) return [text, []];
 
-    await this._initPipeline();
+    // Ensure pool is initialized (waits for pre-warm if still in progress)
+    await this._warmupPromise;
 
     const timeoutSec = parseInt(process.env.MASK_NLP_TIMEOUT_SECONDS || "30");
     const timeoutMs = timeoutSec * 1000;
 
     try {
-      const results = await withTimeout(this._pipeline(text), timeoutMs) as any[];
+      const ac = new AbortController();
+      const cacheDir = process.env.MASK_MODEL_CACHE_DIR;
+      const results = await withTimeout(
+        this._pool.run({ text, modelName: this._modelName, cacheDir }, { signal: ac.signal }),
+        timeoutMs,
+        ac
+      ) as any[];
       if (!results || results.length === 0) return [text, []];
 
       const entities: any[] = [];
@@ -148,13 +182,10 @@ export class LocalTransformersScanner extends BaseScanner {
       }
 
       if (current && (isSubToken || sameType)) {
-        // If types match or it's a sub-token, and they are reasonably close, merge.
-        // We allow a small gap (e.g. 1 char for a space) if types match.
         const gap = r.start - current.end;
         if (isSubToken || gap <= 1) {
           current.end = Math.max(current.end, r.end);
           current.score = Math.min(current.score, r.score);
-          // Update word only if needed for debugging, the offsets are what matter
           current.word = originalText.slice(current.start, current.end);
         } else {
           merged.push(current);
@@ -167,5 +198,18 @@ export class LocalTransformersScanner extends BaseScanner {
     }
     if (current) merged.push(current);
     return merged;
+  }
+
+  /**
+   * Gracefully shut down the worker pool.
+   * Call this during application shutdown to prevent the Node.js process from hanging.
+   */
+  async close(): Promise<void> {
+    if (this._pool) {
+      await this._pool.destroy();
+      this._pool = null;
+      this._warmupPromise = null;
+      console.info('[NLP Pool] Worker pool destroyed.');
+    }
   }
 }

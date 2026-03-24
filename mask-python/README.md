@@ -27,9 +27,9 @@ Instead of trusting the LLM to safeguard plain-text data, the system strictly en
 
 This guarantees that the LLM can orchestrate workflows involving sensitive data without ever actually exposing the raw data to the model or its remote provider logs. 
 
-Additionally, we solve two critical sub-issues to make this enterprise-ready:
-1. **The Statefulness Trap**: Traditional "vaults" break down in multi-node Kubernetes environments. We support pluggable distributed vaults (Redis, DynamoDB, Memcached) so detokenization state is instantly shared across all your horizontally scaled pods.
-2. **The Schema Trap**: Strict downstream tools will crash if handed a random token. We use Format-Preserving Tokenization backed by an encrypted vault to generate tokens that retain the exact format of the original data (Emails, US Phones, SSNs, 16-digit Credit Cards, 9-digit Routing Numbers). Tokens look like real data; the real values are stored encrypted and retrieved via the vault.
+Additionally, the SDK addresses two technical considerations for production use:
+1. **Distributed State Management**: Traditional "vaults" may lose state in multi-node environments. Pluggable backends (Redis, DynamoDB, Memcached) ensure detokenization state is shared across all pods.
+2. **Schema Compatibility**: Downstream tools frequently require specific formats. Format-Preserving Tokenization (Emails, US Phones, SSNs, etc.) generates tokens that retain the format of original data.
 
 ### How We Handle Data (Local-First by Default)
 
@@ -79,28 +79,30 @@ client = MaskClient(
 safe_token = client.encode("user@tenant.com")
 ```
 
-### 3. Heuristic Safety mathematically guaranteed
-It is catastrophic if an SDK misidentifies a user's *real* SSN as a "token" and accidentally passes it in plaintext to an LLM. Mask's `looks_like_token()` heuristic algorithm strictly uses universally invalid prefixes. 
-* SSN tokens always begin with `000` (The Social Security Administration has never issued an Area Number of 000).
+### 3. Collision Avoidance
+Mask prevents the misidentification of real data as tokens by using universally invalid prefixes for token generation:
+* SSN tokens always begin with `000` (The Social Security Administration does not issue Area Numbers of 000).
 * Routing tokens always begin with `0000` (The Federal Reserve valid range starts at 01).
 * Credit Card tokens use the `4000-0000-0000` Visa reserved test BIN. 
-By generating statistically impossible tokens, Mask guarantees it will never accidentally swallow real PII.
+
+This prefix-based approach ensures that the SDK does not inadvertently process valid PII as an existing token.
 
 ### 4. Enterprise Async Support
-Mask introduces native `asyncio` wrappers for all core operations. Calling `aencode()`, `adecode()`, or `ascan_and_tokenize()` allows high-throughput ASGI applications (FastAPI, Quart) to handle PII tokenization without blocking the event loop on cryptographic CPU tasks.
+Mask includes native asyncio wrappers for all core operations. Calling `aencode()`, `adecode()`, or `ascan_and_tokenize()` allows high-throughput ASGI applications (FastAPI, Quart) to handle PII tokenization without blocking the event loop on cryptographic CPU tasks.
 
 ### 5. Pluggable Key Providers (AWS KMS / HashiCorp Vault)
-For zero-trust environments, `MASK_ENCRYPTION_KEY` no longer needs to live in a static environment variable. Developers can now inject a `BaseKeyProvider` to fetch secrets dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault at runtime.
+For zero-trust environments, `MASK_ENCRYPTION_KEY` can be managed outside of static environment variables. Developers can inject a `BaseKeyProvider` to fetch secrets dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault at runtime.
 
 ### 6. Remote NLP Scanning
-Performance-sensitive deployments can now offload the ~500MB spaCy NLP model to a centralized Presidio Analyzer service using the new `RemotePresidioScanner`. This permits "lightweight" edge agents (e.g., Lambda functions) to run Mask with near-zero memory footprint.
+Performance-sensitive deployments offload the ~500MB spaCy NLP model to a centralized Presidio Analyzer service using the `RemotePresidioScanner`. This permits "lightweight" edge agents (e.g., Lambda functions) to run Mask with near-zero memory footprint.
 
 ### 7. Sub-string Detokenization
 Mask includes the ability to detokenize PII embedded within larger text blocks (like email bodies or chat messages). `detokenize_text()` uses high-performance regex to find and restore all tokens within a paragraph before they hit your tools.
 
-### 8. Performance Optimizations (Production-Ready)
-- **Persistent Scanner Pool**: The NLP scanner now utilizes a module-level `ThreadPoolExecutor` internally, eliminating thread-churn latency on each call.
-- **Probabilistic Vault Cleanup**: `MemoryVault` now uses a probabilistic $O(1)$ cleanup strategy (~1% frequency) to avoid $O(N)$ blocking scans in high-concurrency environments.
+### 8. Performance & Scalability
+- **Persistent Scanner Pool**: The NLP scanner utilizes a module-level `ThreadPoolExecutor` internally, eliminating thread-churn latency on each call.
+- **Probabilistic Vault Cleanup**: `MemoryVault` uses a probabilistic $O(1)$ cleanup strategy to avoid $O(N)$ blocking scans. Frequency is configurable via `MASK_VAULT_CLEANUP_FREQUENCY`.
+- **Thread-Safe Singletons**: Core accessors for `Vault`, `KeyProvider`, and `Scanner` are thread-safe and lazily initialized, preventing race conditions during high-concurrency app startup.
 
 ## Installation and Setup
 
@@ -160,14 +162,8 @@ export MASK_MASTER_KEY="..."
 #### 2. Pluggable Key Management (Enterprise KMS)
 For zero-trust environments, Mask supports a pluggable `BaseKeyProvider` architecture. You can inject a custom provider to fetch secrets dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault.
 
-```python
-from mask_privacy.core.key_provider import set_key_provider, AwsKmsKeyProvider
-set_key_provider(AwsKmsKeyProvider(key_id="alias/mask", region="us-east-1"))
-```
-
-> [!IMPORTANT]
-> **Production Security (Fail-Shut)**:
-> All KMS stub providers are designed to **Fail-Shut**. If you attempt to use a stub provider that is not yet fully implemented, the SDK will raise a `NotImplementedError` instead of falling back to insecure defaults. This ensures that you never accidentally encrypt data with a weak or auto-generated key when you intended to use a KMS.
+> [!NOTE]
+> All KMS stub providers are designed for **Fail-Shut** operation. If you attempt to use a stub provider that is not yet implemented, the SDK will raise a `NotImplementedError` rather than fall back to insecure defaults.
 
 #### 2. Select Scanner Type
 ```bash
@@ -195,6 +191,15 @@ export MASK_STRICT_PROD=true
 
 # Configure NLP thread pool size (default: 4)
 export MASK_NLP_MAX_WORKERS=8
+
+# Configure Blind Index Salt (Optional)
+export MASK_BLIND_INDEX_SALT="custom-salt-here"
+
+> [!IMPORTANT]
+> **Security Warning:** In production, you **must** change the default `MASK_BLIND_INDEX_SALT`. Using the default salt makes your blind indices vulnerable to pre-computed hash (rainbow table) attacks across different SDK installations.
+
+# Configure MemoryVault cleanup aggressiveness (default: 0.01)
+export MASK_VAULT_CLEANUP_FREQUENCY=0.05
 ```
 
 For production and staging environments, `MASK_ENCRYPTION_KEY` **must** be set;
@@ -203,7 +208,7 @@ the SDK will not start without it.
 ---
 
 ### 1. Unified Async API
-All core methods now have non-blocking async variants for use in FastAPI/ASGI environments.
+All core methods have non-blocking async variants for use in FastAPI/ASGI environments. They are truly non-blocking, natively utilizing `AsyncRedisVault` under the hood for data caching, and properly offloading any blocking execution to explicitly managed thread pools to prevent thread exhaustion.
 ```python
 import asyncio
 from mask_privacy import aencode, adecode, ascan_and_tokenize
@@ -297,7 +302,7 @@ secure_agent = Agent(
 ## Testing and Verification
 
 ### The Test Suite
-The SDK is highly comprehensive and fully verified with a native `pytest` suite. It ensures cryptographic integrity, FPE format compliance, asynchronous telemetry, and distributed vault TTL expiry across all layers.
+The SDK is verified with a `pytest` suite covering cryptographic integrity, FPE format compliance, asynchronous telemetry, and distributed vault TTL expiry.
 
 #### Core Tests (`test_fpe.py`, `test_vault.py`, `test_vault_backends.py`)
 - **Format-Preserving Tokenization Integrity:** Validates that tokens preserve their original formats (e.g., emails become `tkn-<hex>@email.com`, SSNs become `000-00-<4 digits>`) to ensure downstream regex and schema validators do not break.
@@ -333,6 +338,9 @@ The SDK includes a thread-safe, asynchronous AuditLogger built-in (`mask_privacy
 As your agents encrypt and decrypt data, the logger buffers these privacy events (e.g., Action: Tokenized Email, Agent: SalesBot, TTL: 600s). **Raw PII is never logged.** 
 
 Audit events are buffered in memory and flushed periodically to stdout as structured JSON. Pipe these logs into your existing Datadog or Splunk agents to generate compliance reports for your SOC2, HIPAA, or PCI-DSS auditors proving that your LLM infrastructure properly isolates sensitive data.
+
+> [!NOTE]  
+> The `AuditLogger` provides graceful shutdown hooks (`SIGTERM`, `SIGINT`) to ensure buffer flushing. To avoid hijacking your primary Web Server (like FastAPI or Uvicorn), you must explicitly opt-in by calling `get_audit_logger().register_signals()`.
 
 To prevent memory issues in high-volume environments, the buffer size can be capped:
 

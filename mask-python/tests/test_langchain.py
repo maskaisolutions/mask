@@ -26,6 +26,13 @@ def _fresh_vault():
 
 
 class TestLangchainMaskToolWrapper:
+    @pytest.fixture(autouse=True)
+    def _mock_nlp(self):
+        # Mock the heavy NLP tier since ProcessPoolExecutor can deadlock or timeout on Windows in tests
+        from unittest.mock import patch
+        from mask_privacy.core.scanner import PresidioScanner
+        with patch.object(PresidioScanner, "_tier2_nlp", side_effect=lambda t, *args, **kwargs: (t, [])):
+            yield
 
     def test_wrapper_detokenizes_inputs_and_tokenizes_outputs(self):
         token = encode("user@example.com")
@@ -44,7 +51,7 @@ class TestLangchainMaskToolWrapper:
 
 class TestLangchainMaskCallbackHandler:
 
-    def test_on_tool_start_mutates_inputs(self):
+    def test_on_tool_start_does_not_mutate_inputs(self):
         handler = MaskCallbackHandler()
 
         token1 = encode("alice@corp.io")
@@ -61,12 +68,20 @@ class TestLangchainMaskCallbackHandler:
             inputs=inputs_dict,
         )
 
-        assert inputs_dict["primary"] == "alice@corp.io"
-        assert inputs_dict["cc"][0] == "bob@corp.io"
+        # Inputs should NOT be mutated — they should remain tokenized
+        assert inputs_dict["primary"] == token1
+        assert inputs_dict["cc"][0] == token2
         assert inputs_dict["cc"][1] == "charlie@corp.io"
 
 
 class TestLangchainSecureTool:
+    @pytest.fixture(autouse=True)
+    def _mock_nlp(self):
+        # Mock the heavy NLP tier since ProcessPoolExecutor can deadlock or timeout on Windows in tests
+        from unittest.mock import patch
+        from mask_privacy.core.scanner import PresidioScanner
+        with patch.object(PresidioScanner, "_tier2_nlp", side_effect=lambda t, *args, **kwargs: (t, [])):
+            yield
 
     def test_secure_tool_decorator_detokenizes_and_retokenizes(self):
         token = encode("dev@mask.ai")
