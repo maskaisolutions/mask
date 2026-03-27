@@ -7,7 +7,7 @@
  */
 
 import * as crypto from 'crypto';
-import * as process from 'process';
+import { config } from '../config';
 import { getKeyProvider } from './key_provider';
 import { MaskSecurityError } from './exceptions';
 import { looksLikeToken } from './fpe_utils';
@@ -28,9 +28,10 @@ async function _getMasterKey(): Promise<Buffer> {
     }
 
     if (!raw) {
-      if (process.env.MASK_DEV_MODE === "true") {
+      if (config.MASK_DEV_MODE) {
         // Auto-generate a session-local key (non-persistent)
         raw = crypto.randomBytes(32).toString('hex');
+        // Update process.env for any other legacy paths that might check it
         process.env.MASK_MASTER_KEY = raw;
       } else {
         throw new MaskSecurityError(
@@ -55,6 +56,10 @@ const _PHONE_RE = /^\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}$|^\d{3}[\
 const _SSN_RE = /^\d{3}-\d{2}-\d{4}$/;
 const _CC_RE = /^(?:\d{4}[ \-]?){3}\d{4}$/;
 const _ROUTING_RE = /^\d{9}$/;
+const _TCID_RE = /^[1-9]\d{9}[02468]$/;
+const _SAUDI_NID_RE = /^1\d{9}$/;
+const _UAE_EID_RE = /^784-\d{4}-\d{7}-\d$/;
+const _IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{4,30}$/;
 
 // Deterministic helpers (HMAC-based)
 
@@ -115,6 +120,30 @@ export async function generateFPEToken(rawText: string): Promise<string> {
 
   if (_ROUTING_RE.test(text)) {
     return `000000${await _hmacDigits(text, 3)}`;
+  }
+
+  // Turkish TC Kimlik No (format: 990000 + XXXX + even digit)
+  if (_TCID_RE.test(text)) {
+    const tail = await _hmacDigits(text, 5);
+    let lastD = parseInt(tail[tail.length - 1], 10);
+    if (lastD % 2 !== 0) lastD = (lastD + 1) % 10;
+    return `990000${tail.slice(0, 4)}${lastD}`;
+  }
+
+  // Saudi National ID (format: 100000XXXX)
+  if (_SAUDI_NID_RE.test(text)) {
+    return `100000${await _hmacDigits(text, 4)}`;
+  }
+
+  // UAE Emirates ID (format: 784-0000-XXXXXXX-X)
+  if (_UAE_EID_RE.test(text)) {
+    return `784-0000-${await _hmacDigits(text, 7)}-${await _hmacDigits(text, 1, 20)}`;
+  }
+
+  // IBAN (format: XX00-XXXX... — preserve country code, zero check digits)
+  if (_IBAN_RE.test(text)) {
+    const countryCode = text.slice(0, 2);
+    return `${countryCode}00${(await _hmacHex(text, 8)).toUpperCase()}`;
   }
 
   return `[TKN-${await _hmacHex(text)}]`;

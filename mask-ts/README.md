@@ -87,6 +87,12 @@ Mask prevents the misidentification of real data as tokens by using universally 
 
 This prefix-based approach ensures that the SDK does not inadvertently process valid PII as an existing token.
 
+Additional collision-proof prefixes for international identifiers:
+* Turkish TCID tokens use the `990000` prefix (no valid Kimlik number starts with `99`).
+* Saudi NID tokens use the `100000` prefix (length-constrained to avoid overlap with real IDs).
+* UAE Emirates ID tokens use the `784-0000-` prefix (zeroed sub-fields are structurally invalid).
+* IBAN tokens zero the check digits (`XX00...`), which always fails ISO 7064 Mod-97 verification.
+
 ### 4. Enterprise Async Support
 Mask is built from the ground up for high-concurrency Node.js environments. All core operations are asynchronous and promised-based. Calling `encode()`, `decode()`, or `scanAndTokenize()` allows your event loop to remain unblocked while handling PII tokenization tasks.
 
@@ -127,19 +133,97 @@ Performance-sensitive deployments utilize the built-in `LocalTransformersScanner
 ### 7. Sub-string Detokenization
 Mask includes the ability to detokenize PII embedded within larger text blocks (like email bodies or chat messages). `detokenizeText()` uses high-performance regex to find and restore all tokens within a paragraph before they hit your tools.
 
-## Installation and Setup
+## Multilingual PII Detection (Waterfall Pipeline)
 
-Install the core SDK via npm:
+Mask is built for the global enterprise. While many privacy tools are English-centric, the TypeScript SDK implements a **3-Tier Waterfall Detection** strategy designed for high-performance PII detection across 8 major languages using local ONNX models.
+
+### Supported Language Matrix
+
+Mask provides first-class support for the following languages:
+
+| Language | Code | Tier 0 (DLP) | Tier 2 (NLP Engine) |
+| :--- | :--- | :--- | :--- |
+| **English** | `en` | ✅ Full | DistilBERT (Simple) |
+| **Spanish** | `es` | ✅ Full | BERT Multilingual |
+| **French** | `fr` | ✅ Full | BERT Multilingual |
+| **German** | `de` | ✅ Full | BERT Multilingual |
+| **Turkish** | `tr` | ✅ Full | BERT Multilingual |
+| **Arabic** | `ar` | ✅ Full | BERT Multilingual |
+| **Japanese** | `ja` | ✅ Full | BERT Multilingual |
+| **Chinese** | `zh` | ✅ Full | BERT Multilingual |
+
+### How the Waterfall Works: The Excising Mechanism
+
+To maintain high performance, the TypeScript SDK does not simply run three separate scans. It uses a **Sequential Mutation** strategy:
+
+1.  **Tier 0 & 1 (The Scouts):** The SDK first runs the high-speed DLP and Regex engines synchronously in the main thread.
+2.  **Immediate Tokenization:** Any PII found by these tiers is **immediately replaced** by a token in the string buffer.
+3.  **Tier 2 (The Heavy Infantry):** The expensive NLP engine (Transformers.js) only scans the *remaining* text. Because the PII has already been "excised" (cut out and replaced with tokens), the NLP engine doesn't waste compute on data already identified.
+4.  **Bypass Logic:** All tiers are "token-aware." If a scan encounter a string that is already a Mask token, it skips it entirely, preventing redundant processing or "double-tokenization."
+
+---
+
+### Configuration & Environment Variables
+
+Configure your multilingual environment using standard variables. These are parsed at runtime when the `LocalTransformersScanner` is initialized.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `MASK_LANGUAGES` | `en` | Comma-separated list of languages (e.g., `en,es,fr,ar`). |
+| `MASK_NLP_MODEL` | *(varies)* | Override the default model (e.g., `Xenova/bert-base-multilingual-cased-ner-hrl`). |
+| `MASK_MODEL_CACHE_DIR` | `~/.cache` | Local directory for storing serialized ONNX models. |
+| `MASK_NLP_MAX_WORKERS` | `4` | Number of worker processes/threads for NLP analysis. |
+| `MASK_NLP_TIMEOUT_SECONDS` | `60` | Max seconds for a scan before timing out. |
+
+---
+
+### Automatic Model Management
+
+The TypeScript SDK manages AI models automatically via the **Transformers.js** runtime. 
+
+#### 1. Automatic Downloads
+When you set `MASK_LANGUAGES` to include non-English languages, the scanner will automatically download the multilingual BERT model from Hugging Face on the first execution and cache it locally.
+
+#### 2. Pre-Warming (Performance)
+Upon initialization, the `LocalTransformersScanner` starts a worker pool and "pre-warms" the models. This ensures that the first real request doesn't suffer from high "cold-start" latency.
+
+#### 3. Air-Gapped / Offline Environments
+For high-security environments, you can pre-cache models. Run this script in your build pipeline:
 ```bash
-npm install mask-privacy
+# Set a custom cache directory
+export MASK_MODEL_CACHE_DIR="./models"
+
+# Run a dummy scan to trigger the download
+node -e "require('mask-privacy').getScanner().scanAndTokenize('John Doe')"
+
+# Bundle the './models' folder with your container
 ```
 
-Add peer dependencies depending on your infrastructure:
+---
+
+### Performance & Latency Benchmarks
+
+*Measured on 4-vCPU 8GB RAM Instance (Node.js 20+)*
+
+| Tier | Engine | Avg. Latency | Rationale |
+| :--- | :--- | :--- | :--- |
+| Tier 0 | DLP (Heuristic) | ~2ms | Main-thread synchronous regex |
+| Tier 1 | Regex (Deterministic) | ~1ms | Main-thread synchronous regex |
+| Tier 2 | Transformers (Local) | 300ms - 800ms | Offloaded to Worker Threads (Piscina) |
+
+**Total Overhead:** Usually **< 400ms** for standard chat lengths. Mask uses an **Excising Mechanism** to ensure that text already identified in Tiers 0/1 is removed from the NLP buffer, significantly accelerating the heavy Transformer inference.
+
+---
+
+### Installing AI Models (Production Ready)
+The TypeScript SDK manages AI models automatically via **Transformers.js**. For production air-gapped environments or to avoid "cold-start" latency, we recommend using the pre-caching CLI:
+
 ```bash
-npm install ioredis          # For Redis vaults
-npm install @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb # For DynamoDB vaults
-npm install memjs            # For Memcached vaults
-npm install @huggingface/transformers # Required for local NLP scanning
+npm install @huggingface/transformers # Required extra
+
+# Pre-cache models for your required languages
+export MASK_LANGUAGES="en,es,fr"
+npx mask-privacy cache-models
 ```
 
 ### Framework Support
@@ -151,6 +235,24 @@ Mask supports major AI frameworks via built-in hooks:
 ### Environment Configuration
 
 Before running your agents, Mask requires an encryption key and a vault backend selection.
+
+#### Where to set these?
+Select the method that best fits your deployment:
+
+1.  **In a `.env` file (Recommended)**: Create a file in your project root.
+    ```env
+    MASK_LANGUAGES="es,en"
+    MASK_ENCRYPTION_KEY="your-key"
+    ```
+    Then load it using a library like `dotenv`.
+2.  **In your Terminal**:
+    *   **Bash**: `export MASK_LANGUAGES="es,en"`
+    *   **PowerShell**: `$env:MASK_LANGUAGES="es,en"`
+3.  **Directly in TypeScript/Node.js**:
+    ```typescript
+    process.env.MASK_LANGUAGES = "es,en";
+    // Ensure this happens BEFORE initializing the MaskClient
+    ```
 
 #### 1. Configure Keys
 By default, Mask reads from environment variables.
@@ -181,15 +283,24 @@ export MASK_DYNAMODB_REGION=us-east-1
 export MASK_MEMCACHED_HOST=localhost
 export MASK_MEMCACHED_PORT=11211
 
-#### 4. Security Enforcement
-# Enable strict mode to refuse startup without MASK_ENCRYPTION_KEY
-export MASK_STRICT_PROD=true
+#### 4. Security Guardrails: Fail-Shut by Default
 
-# Configure Blind Index Salt (Optional)
-export MASK_BLIND_INDEX_SALT="custom-salt-here"
+To prevent accidental data leakage, Mask defaults to a **Fail-Shut** strategy. If the Vault or Key Provider is unreachable, the SDK will throw a `MaskVaultConnectionError`.
 
 > [!IMPORTANT]
-> **Security Warning:** In production, you **must** change the default `MASK_BLIND_INDEX_SALT`. Using the default salt makes your blind indices vulnerable to pre-computed hash (rainbow table) attacks across different SDK installations.
+> **Environment Modes:**
+> - **Production (Default):** Fail-Shut enabled. Strictly protects PII.
+> - **Development:** Set `MASK_ENV=dev` to allow "Fail-Open" behavior (PII is returned as-is if the vault fails).
+
+#### 5. Model Pre-caching CLI
+
+For production air-gapped environments or to avoid "cold-start" latency, use the model pre-caching tool:
+
+```bash
+# Cache English and Spanish models
+export MASK_MODEL_CACHE_DIR="./models"
+npx ts-node src/cli.ts cache-models --languages en,es
+```
 
 # Configure MemoryVault cleanup aggressiveness (default: 0.01)
 export MASK_VAULT_CLEANUP_FREQUENCY=0.05

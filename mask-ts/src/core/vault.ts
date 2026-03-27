@@ -10,8 +10,8 @@
  * The active vault is selected via the MASK_VAULT_TYPE env var.
  */
 
-import * as process from 'process';
 import * as crypto from 'crypto';
+import { config } from '../config';
 import { generateFPEToken } from './fpe';
 import { looksLikeToken, TOKEN_PATTERN } from './fpe_utils';
 import { getCryptoEngineAsync } from './crypto';
@@ -30,16 +30,20 @@ let strategyWarned = false;
 
 /** @internal - exported for tests */
 export function _getFailStrategy(): string {
-  const strategy = (process.env.MASK_FAIL_STRATEGY || "").toLowerCase();
+  const strategy = config.MASK_FAIL_STRATEGY;
   if (!strategy) {
-    if (process.env.MASK_STRICT_PROD === "true") {
-      return "closed";
+    // Secure-by-default: fail-shut unless explicitly in dev mode or requested via STRICT_PROD
+    const env = config.MASK_ENV;
+    if (env === "dev" || env === "development") {
+      if (!strategyWarned) {
+        console.warn("MASK_ENV is 'dev'; defaulting to 'open'. PII may leak during vault failures.");
+        strategyWarned = true;
+      }
+      return "open";
     }
-    if (!strategyWarned) {
-      console.warn("MASK_FAIL_STRATEGY is unset; defaulting to 'open'. PII may leak during vault failures.");
-      strategyWarned = true;
-    }
-    return "open";
+
+    // Default to closed for production/unset envs
+    return "closed";
   }
   return strategy;
 }
@@ -92,7 +96,7 @@ export class MemoryVault extends BaseVault {
   private _cleanup(): void {
     // Probabilistic cleanup to prevent memory bloat
     // Configurable frequency (default 1%) balances CPU vs Memory usage
-    const cleanupFreq = parseFloat(process.env.MASK_VAULT_CLEANUP_FREQUENCY || "0.01");
+    const cleanupFreq = config.MASK_VAULT_CLEANUP_FREQUENCY;
     if (Math.random() > cleanupFreq) {
       return;
     }
@@ -170,7 +174,7 @@ export class RedisVault extends BaseVault {
     super();
     try {
       const Redis = require('ioredis');
-      const url = process.env.MASK_REDIS_URL || "redis://localhost:6379/0";
+      const url = config.MASK_REDIS_URL;
       this._client = new Redis(url, {
         ...options,
         maxRetriesPerRequest: 5,
@@ -279,14 +283,14 @@ export class DynamoDBVault extends BaseVault {
     super();
     const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
     const { DynamoDBDocument } = require('@aws-sdk/lib-dynamodb');
-    this._region = process.env.MASK_DYNAMODB_REGION || "us-east-1";
-    this._tableName = process.env.MASK_DYNAMODB_TABLE || "mask-vault";
+    this._region = config.MASK_DYNAMODB_REGION;
+    this._tableName = config.MASK_DYNAMODB_TABLE;
     
     // Optimize connection pooling for high-throughput
     const https = require('https');
     const agent = new https.Agent({
       keepAlive: true,
-      maxSockets: parseInt(process.env.MASK_DYNAMODB_MAX_SOCKETS || "50", 10)
+      maxSockets: config.MASK_DYNAMODB_MAX_SOCKETS
     });
 
     let requestHandler;
@@ -437,8 +441,8 @@ export class MemcachedVault extends BaseVault {
     super();
     try {
       const memjs = require('memjs');
-      const host = process.env.MASK_MEMCACHED_HOST || "localhost";
-      const port = process.env.MASK_MEMCACHED_PORT || "11211";
+      const host = config.MASK_MEMCACHED_HOST;
+      const port = config.MASK_MEMCACHED_PORT;
       this._client = memjs.Client.create(`${host}:${port}`, options);
       console.info(`MemcachedVault connected to ${host}:${port}`);
     } catch (e) {
@@ -498,11 +502,11 @@ export class MemcachedVault extends BaseVault {
 // Singleton accessor
 
 let _vaultInstance: BaseVault | null = null;
-const DEFAULT_TTL = parseInt(process.env.MASK_VAULT_TTL || "600");
+const DEFAULT_TTL = config.MASK_VAULT_TTL;
 
 export function getVault(): BaseVault {
   if (_vaultInstance === null) {
-    const vaultType = (process.env.MASK_VAULT_TYPE || "memory").toLowerCase();
+    const vaultType = config.MASK_VAULT_TYPE;
     switch (vaultType) {
       case "redis":
         _vaultInstance = new RedisVault();

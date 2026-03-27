@@ -25,6 +25,7 @@ import hashlib
 import re
 import logging
 from typing import Optional
+from mask_privacy import config
 
 logger = logging.getLogger("mask.fpe")
 
@@ -48,7 +49,7 @@ def _get_master_key() -> bytes:
             import secrets
             raw = secrets.token_hex(32)
             os.environ["MASK_MASTER_KEY"] = raw
-            if os.environ.get("MASK_DEV_MODE") != "true":
+            if not config.MASK_DEV_MODE:
                 from mask_privacy.core.exceptions import MaskSecurityError
                 raise MaskSecurityError(
                     "MASK_MASTER_KEY not set and MASK_DEV_MODE is not 'true'. "
@@ -78,6 +79,12 @@ _PHONE_RE = re.compile(
 _SSN_RE   = re.compile(r"^\d{3}-\d{2}-\d{4}$")
 _CC_RE    = re.compile(r"^(?:\d{4}[ \-]?){3}\d{4}$")
 _ROUTING_RE = re.compile(r"^\d{9}$")
+
+# International ID format detectors
+_TCID_RE = re.compile(r"^[1-9]\d{9}[02468]$")           # Turkish TC Kimlik
+_SAUDI_NID_RE = re.compile(r"^1\d{9}$")                  # Saudi National ID
+_UAE_EID_RE = re.compile(r"^784-\d{4}-\d{7}-\d$")        # UAE Emirates ID
+_IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{4,30}$") # IBAN
 
 # Deterministic helpers (HMAC-based)
 
@@ -127,9 +134,6 @@ def generate_fpe_token(raw_text: str) -> str:
     if _EMAIL_RE.match(text):
         return f"tkn-{_hmac_hex(text)}@email.com"
 
-    if _PHONE_RE.match(text):
-        return f"+1-555-{_hmac_digits(text, 7)}"
-
     if _SSN_RE.match(text):
         return f"000-00-{_hmac_digits(text, 4)}"
 
@@ -140,6 +144,31 @@ def generate_fpe_token(raw_text: str) -> str:
     # US ABA Routing Number (format: 000000XXX)
     if _ROUTING_RE.match(text):
         return f"000000{_hmac_digits(text, 3)}"
+
+    # Turkish TC Kimlik No (format: 990000 + XXXX + even digit)
+    if _TCID_RE.match(text):
+        tail = _hmac_digits(text, 5)
+        last_d = int(tail[-1])
+        if last_d % 2 != 0:
+            last_d = (last_d + 1) % 10
+        return f"990000{tail[:4]}{last_d}"
+
+    # Saudi National ID (format: 100000XXXX)
+    if _SAUDI_NID_RE.match(text):
+        return f"100000{_hmac_digits(text, 4)}"
+
+    # UAE Emirates ID (format: 784-0000-0000000-X)
+    if _UAE_EID_RE.match(text):
+        return f"784-0000-{_hmac_digits(text, 7)}-{_hmac_digits(text, 1, offset=20)}"
+
+    # IBAN (format: XX00-XXXX... — preserve country code, zero check digits)
+    if _IBAN_RE.match(text):
+        country = text[:2]
+        return f"{country}00{_hmac_hex(text, n=min(len(text) - 4, 16)).upper()}"
+
+    # Generic phone falls back here to avoid overriding specific 10/11 digit IDs
+    if _PHONE_RE.match(text):
+        return f"+1-555-{_hmac_digits(text, 7)}"
 
     # Opaque fallback
     return f"[TKN-{_hmac_hex(text)}]"
@@ -153,6 +182,10 @@ TOKEN_PATTERN = re.compile(
     r"|000-00-\d{4}"                            # SSN
     r"|4000-0000-0000-\d{4}"                    # CC
     r"|000000\d{3}"                             # Routing
+    r"|990000\d{4}[02468]"                      # Turkish TCID token
+    r"|100000\d{4}"                             # Saudi NID token
+    r"|784-0000-\d{7}-\d"                       # UAE EID token
+    r"|[A-Z]{2}00[A-F0-9]{4,16}"                # IBAN token
     r"|\[TKN-[a-f0-9]{8,64}\]"                   # Opaque
 )
 
@@ -189,6 +222,22 @@ def looks_like_token(value: str) -> bool:
 
     # Routing tokens: 000000XXX  (invalid Fed symbol 0000)
     if v.startswith("000000") and len(v) == 9 and v[6:].isdigit():
+        return True
+
+    # UAE Emirates ID tokens: 784-0000-XXXXXXX-X
+    if v.startswith("784-0000-") and len(v) == 18:
+        return True
+
+    # Turkish TCID tokens
+    if len(v) == 11 and v.startswith("990000") and v.isdigit() and int(v[-1]) % 2 == 0:
+        return True
+        
+    # Saudi NID tokens
+    if len(v) == 10 and v.startswith("100000") and v.isdigit():
+        return True
+
+    # IBAN tokens: XX00... (zero check digits indicate synthetic)
+    if len(v) >= 8 and v[:2].isalpha() and v[2:4] == "00":
         return True
 
     # Opaque fallback tokens: [TKN-<hex>]

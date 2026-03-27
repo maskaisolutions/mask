@@ -18,6 +18,7 @@ import signal
 from typing import Any, Dict, Optional, List
 
 from mask_privacy.core.fpe import looks_like_token
+from mask_privacy import config
 
 logger = logging.getLogger("mask.telemetry")
 
@@ -91,8 +92,8 @@ class AuditLogger:
         self._running = False
         self._timer: Optional[threading.Timer] = None
         self._buffer: List[Dict[str, Any]] = []
-        self._max_buffer_size = int(os.environ.get("MASK_AUDIT_MAX_BUFFER_SIZE", "5000"))
-        self._strict_mode = os.environ.get("MASK_AUDIT_LOG_STRICT", "false").lower() == "true"
+        self._max_buffer_size = config.MASK_AUDIT_MAX_BUFFER_SIZE
+        self._strict_mode = config.MASK_AUDIT_LOG_STRICT
         self._buffer_full_warned = False
         self._handlers_registered = False
 

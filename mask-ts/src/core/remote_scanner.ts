@@ -4,6 +4,7 @@
 
 import { BaseScanner } from './scanner';
 import { looksLikeToken } from './fpe_utils';
+import { config } from '../config';
 import { getLogger } from '../telemetry/audit_logger';
 
 const logger = getLogger('mask.scanner.remote');
@@ -13,7 +14,7 @@ export class RemoteScanner extends BaseScanner {
 
   constructor(url?: string) {
     super();
-    this._url = url || process.env.MASK_SCANNER_URL || "http://localhost:5001/analyze";
+    this._url = url || config.MASK_SCANNER_URL;
     logger.info(`Using RemoteScanner at ${this._url}`);
   }
 
@@ -40,7 +41,7 @@ export class RemoteScanner extends BaseScanner {
             text,
             language: "en"
         }, {
-            timeout: parseInt(process.env.MASK_NLP_TIMEOUT_SECONDS || "60") * 1000
+            timeout: config.MASK_NLP_TIMEOUT_SECONDS * 1000
         });
         results = response.data;
     } catch (e: any) {

@@ -34,6 +34,13 @@ except ImportError:
 from mask_privacy.core.vault import encode
 from mask_privacy.core.fpe import generate_fpe_token, looks_like_token
 
+# DLP Pipeline imports — multilingual detection + 50-type registry
+from mask_privacy.core.dlp.scorer import DLPConfidenceScorer
+from mask_privacy.core.dlp.assessor import LanguageContextResolver
+from mask_privacy.core.dlp.registry import DLPPatternRegistry
+from mask_privacy.core.dlp.handlers import DLPValidationEngine
+from mask_privacy import config
+
 logger = logging.getLogger("mask.scanner")
 
 from concurrent.futures import ProcessPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -45,23 +52,86 @@ def _init_worker() -> None:
     """Initialize the Presidio Analyzer inside the worker process to avoid pickling models."""
     global _worker_analyzer
     import spacy
-    available_models = [m for m in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm") if spacy.util.is_package(m)]
-    if not available_models: return
-    selected_model = available_models[0]
-    
+    import os
     from presidio_analyzer import AnalyzerEngine
     from presidio_analyzer.nlp_engine import NlpEngineProvider
-    provider = NlpEngineProvider(nlp_configuration={
-        "nlp_engine_name": "spacy",
-        "models": [{"lang_code": "en", "model_name": selected_model}],
-    })
-    _worker_analyzer = AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["en"])
 
-def _run_analyzer(text: str, entities: List[str]) -> Any:
+    req_langs = [lang.strip().lower() for lang in config.MASK_LANGUAGES.split(",")]
+    nlp_engine_name = config.MASK_NLP_ENGINE
+    
+    models_config = []
+    supported_langs = []
+    
+    if nlp_engine_name == "transformers" or "ar" in req_langs:
+        hf_model = config.MASK_NLP_MODEL or "Davlan/bert-base-multilingual-cased-ner-hrl"
+        for lang in req_langs:
+            spacy_model = "en_core_web_sm"
+            lang_to_spacy = {
+                "en": ["en_core_web_sm"], "es": ["es_core_news_sm"], "fr": ["fr_core_news_sm"],
+                "de": ["de_core_news_sm"], "tr": ["tr_core_news_trf", "en_core_web_sm"], 
+                "ar": ["en_core_web_sm"], "ja": ["ja_core_news_sm"], "zh": ["zh_core_web_sm"]
+            }
+            for c in lang_to_spacy.get(lang, ["en_core_web_sm"]):
+                if spacy.util.is_package(c):
+                    spacy_model = c
+                    break
+            
+            models_config.append({
+                "lang_code": lang,
+                "model_name": {"spacy": spacy_model, "transformers": hf_model}
+            })
+            supported_langs.append(lang)
+            
+        provider = NlpEngineProvider(nlp_configuration={
+            "nlp_engine_name": "transformers",
+            "models": models_config,
+            "ner_model_configuration": {
+                "model_to_presidio_entity_mapping": {
+                    "PER": "PERSON", "PERSON": "PERSON", "LOC": "LOCATION", "LOCATION": "LOCATION",
+                    "GPE": "LOCATION", "ORG": "ORGANIZATION", "ORGANIZATION": "ORGANIZATION"
+                },
+                "low_confidence_score_multiplier": 0.4,
+                "low_score_entity_names": ["ORGANIZATION", "ORG"],
+                "default_score": 0.85
+            }
+        })
+    else:
+        lang_to_spacy_map = {
+            "en": ["en_core_web_lg", "en_core_web_md", "en_core_web_sm"],
+            "es": ["es_core_news_lg", "es_core_news_md", "es_core_news_sm"],
+            "fr": ["fr_core_news_lg", "fr_core_news_md", "fr_core_news_sm"],
+            "de": ["de_core_news_lg", "de_core_news_md", "de_core_news_sm"],
+            "tr": ["tr_core_news_trf", "en_core_web_lg"],
+            "ja": ["ja_core_news_lg", "ja_core_news_md", "ja_core_news_sm"],
+            "zh": ["zh_core_web_lg", "zh_core_web_md", "zh_core_web_sm"],
+            "ar": ["en_core_web_sm"]
+        }
+        for lang in req_langs:
+            selected_model = None
+            for m in lang_to_spacy_map.get(lang, ["en_core_web_sm"]):
+                if spacy.util.is_package(m):
+                    selected_model = m
+                    break
+            if selected_model:
+                models_config.append({"lang_code": lang, "model_name": selected_model})
+                supported_langs.append(lang)
+            else:
+                logger.warning(f"No spaCy model found for language '{lang}'.")
+        
+        if not models_config:
+            return
+            
+        provider = NlpEngineProvider(nlp_configuration={"nlp_engine_name": "spacy", "models": models_config})
+        
+    _worker_analyzer = AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=supported_langs)
+
+def _run_analyzer(text: str, entities: List[str], language: str = "en") -> Any:
     """Top-level function to be executed by the ProcessPoolExecutor."""
     if _worker_analyzer is None:
-        raise RuntimeError("Scanner worker not initialized with spaCy model.")
-    return _worker_analyzer.analyze(text=text, entities=entities, language="en")
+        raise RuntimeError("Scanner worker not initialized with NLP model.")
+    if language not in _worker_analyzer.supported_languages:
+        language = _worker_analyzer.supported_languages[0] if _worker_analyzer.supported_languages else "en"
+    return _worker_analyzer.analyze(text=text, entities=entities, language=language)
 
 import threading
 
@@ -75,7 +145,7 @@ def _get_scanner_pool() -> ProcessPoolExecutor:
         with _POOL_LOCK:
             if _SCANNER_POOL is None:
                 _SCANNER_POOL = ProcessPoolExecutor(
-                    max_workers=int(os.environ.get("MASK_NLP_MAX_WORKERS", "4")),
+                    max_workers=config.MASK_NLP_MAX_WORKERS,
                     initializer=_init_worker
                 )
     return _SCANNER_POOL
@@ -114,6 +184,12 @@ CONTEXT_KEYWORDS = frozenset([
     "iban", "bank", "email", "pii", "personal info",
 ])
 
+# ── DLP pipeline singletons (lazy-init, lightweight) ─────────────────────────
+_dlp_lang_resolver = LanguageContextResolver()
+_dlp_pattern_registry = DLPPatternRegistry()
+_dlp_validation_engine = DLPValidationEngine()
+_dlp_confidence_scorer = DLPConfidenceScorer()
+
 
 # Scanner class
 
@@ -125,18 +201,7 @@ class PresidioScanner:
     """
 
     def __init__(self) -> None:
-        import spacy
-        available_models = [
-            m for m in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm")
-            if spacy.util.is_package(m)
-        ]
-        if not available_models:
-            raise ImportError(
-                "Mask: Missing AI Model. To enable PII protection, please run: "
-                'pip install "mask-privacy[sm]" (Small) or pip install "mask-privacy[lg]" (Large).'
-            )
-        selected_model = available_models[0]
-        logger.info("Using spaCy model: %s (in worker processes)", selected_model)
+        logger.info("Initializing PresidioScanner. Workers will load models based on MASK_LANGUAGES.")
 
         self._supported_entities = [
             "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD",
@@ -147,6 +212,94 @@ class PresidioScanner:
         """Replace the entity detection list."""
         self._supported_entities = list(entities)
         logger.info("Scanner entities updated: %s", self._supported_entities)
+
+    # Tier 0 — DLP Heuristic Pipeline (multilingual, 50+ types)
+    def _tier0_dlp_heuristic(
+        self,
+        text: str,
+        encode_fn,
+        confidence_threshold: float,
+    ) -> tuple[str, List[Dict]]:
+        """Run the DLP pattern registry with language-aware scoring.
+
+        This tier executes *before* the legacy regex / NLP tiers and removes
+        validated matches from the text buffer to avoid double-detection.
+        """
+        detected_language = _dlp_lang_resolver.resolve(text)
+        logger.debug("DLP language context: %s", detected_language)
+
+        raw_hits: list[tuple[int, int, str, str, float]] = []
+
+        # Pass 1: Structured patterns from the registry
+        for type_tag, descriptor in _dlp_pattern_registry.iter_descriptors():
+            for m in descriptor.compiled_re.finditer(text):
+                matched_str = m.group(0)
+                if looks_like_token(matched_str):
+                    continue
+                validator_result = _dlp_validation_engine.run(
+                    descriptor.validator_tag, matched_str
+                )
+                conf = _dlp_confidence_scorer.score(
+                    base_risk=descriptor.base_risk,
+                    match_start=m.start(),
+                    match_end=m.end(),
+                    full_text=text,
+                    proximity_terms=descriptor.proximity_terms,
+                    validator_passed=validator_result,
+                )
+                if conf >= confidence_threshold:
+                    raw_hits.append((m.start(), m.end(), type_tag, matched_str, conf))
+
+        # Pass 2: Locale-tuned name patterns
+        for name_re in _dlp_pattern_registry.name_patterns_for(detected_language):
+            for m in name_re.finditer(text):
+                if looks_like_token(m.group(0)):
+                    continue
+                conf = _dlp_confidence_scorer.score(
+                    base_risk=0.50,
+                    match_start=m.start(),
+                    match_end=m.end(),
+                    full_text=text,
+                    proximity_terms=frozenset({"name", "contact", "person", "nom", "isim", "اسم"}),
+                    validator_passed=None,
+                )
+                if conf >= confidence_threshold:
+                    raw_hits.append((m.start(), m.end(), "PERSON_NAME", m.group(0), conf))
+
+        # Pass 3: Locale-tuned address patterns
+        for addr_re in _dlp_pattern_registry.address_patterns_for(detected_language):
+            for m in addr_re.finditer(text):
+                if looks_like_token(m.group(0)):
+                    continue
+                raw_hits.append((m.start(), m.end(), "PHYS_ADDRESS", m.group(0), 0.55))
+
+        # De-duplicate overlapping spans — keep longer / higher-confidence match
+        raw_hits.sort(key=lambda h: (h[0], -(h[1] - h[0]), -h[4]))
+        deduped: list[tuple[int, int, str, str, float]] = []
+        occupied_end = -1
+        for start, end, tag, val, conf in raw_hits:
+            if start >= occupied_end:
+                deduped.append((start, end, tag, val, conf))
+                occupied_end = end
+
+        # Replace right-to-left to preserve offsets
+        entities: List[Dict] = []
+        excised = text
+        for start, end, tag, val, conf in reversed(deduped):
+            token = encode_fn(val)
+            excised = excised[:start] + token + excised[end:]
+            entities.append({
+                "start": start,
+                "end": end,
+                "type": tag,
+                "value": val,
+                "method": "dlp_heuristic",
+                "confidence": conf,
+                "masked_value": token,
+                "language": detected_language,
+            })
+
+        return excised, entities
 
     # Tier 1 — Deterministic detection
     @staticmethod
@@ -241,15 +394,16 @@ class PresidioScanner:
         """
         from mask_privacy.core.exceptions import MaskNLPTimeout
 
-        timeout = float(os.environ.get("MASK_NLP_TIMEOUT_SECONDS", "60"))
+        timeout = config.MASK_NLP_TIMEOUT_SECONDS
 
         entities: List[Dict] = []
 
         # Run the heavy NLP analysis in the Process Pool
+        lang = _dlp_lang_resolver.resolve(text)
         pool = _get_scanner_pool()
         future = pool.submit(
             _run_analyzer,
-            text, self._supported_entities
+            text, self._supported_entities, lang
         )
         try:
             results = future.result(timeout=timeout)
@@ -316,9 +470,13 @@ class PresidioScanner:
         if not text or not isinstance(text, str):
             return text
 
-        pipeline = pipeline or ["regex", "checksum", "nlp"]
+        pipeline = pipeline or ["dlp", "regex", "checksum", "nlp"]
         _encode = encode_fn or encode
         boost = self._resolve_boost(context)
+
+        # --- Tier 0: DLP Heuristic (multilingual, 50+ types) ---
+        if "dlp" in pipeline:
+            text, _ = self._tier0_dlp_heuristic(text, _encode, confidence_threshold)
 
         # --- Tier 1: Deterministic ---
         if "regex" in pipeline or "checksum" in pipeline:
@@ -343,12 +501,16 @@ class PresidioScanner:
         if not text or not isinstance(text, str):
             return []
 
-        pipeline = pipeline or ["regex", "checksum", "nlp"]
+        pipeline = pipeline or ["dlp", "regex", "checksum", "nlp"]
         _encode = encode_fn or encode
         boost = self._resolve_boost(context)
         all_entities: List[Dict] = []
 
         remaining = text
+
+        if "dlp" in pipeline:
+            remaining, tier0 = self._tier0_dlp_heuristic(remaining, _encode, confidence_threshold)
+            all_entities.extend(tier0)
 
         if "regex" in pipeline or "checksum" in pipeline:
             remaining, tier1 = self._tier1_regex(remaining, _encode, boost, aggressive, confidence_threshold)
@@ -377,7 +539,7 @@ class PresidioScanner:
         if not text or not isinstance(text, str):
             return text
 
-        pipeline = pipeline or ["regex", "checksum", "nlp"]
+        pipeline = pipeline or ["dlp", "regex", "checksum", "nlp"]
         
         # Default to vault.aencode if not provided
         if encode_fn is None:
@@ -388,19 +550,24 @@ class PresidioScanner:
             
         boost = self._resolve_boost(context)
 
+        # --- Tier 0: DLP Heuristic (sync, fast) ---
+        if "dlp" in pipeline:
+            # DLP tier uses sync encode via identity pass then async encode
+            _, dlp_entities = self._tier0_dlp_heuristic(text, lambda x: x, confidence_threshold)
+            if dlp_entities:
+                vals = [e["value"] for e in dlp_entities]
+                tokens = await asyncio.gather(*[_encode(v) for v in vals])
+                dlp_entities.sort(key=lambda x: x.get("start", 0), reverse=True)
+                for i, e in enumerate(reversed(dlp_entities)):
+                    idx = len(dlp_entities) - 1 - i
+                    text = text[:dlp_entities[idx]["start"]] + tokens[idx] + text[dlp_entities[idx]["end"]:]
+
         # --- Tier 1: Deterministic ---
-        # Tier 1 is CPU-bound but extremely fast, so running it in-line is fine.
-        # However, we must ensure it uses the sync encode if necessary, or just wait if async.
-        # For simplicity, we wrap the sync tier1 and then handle the async encode.
         if "regex" in pipeline or "checksum" in pipeline:
-            # We do a special two-pass here if _encode is async
-            # Pass 1: find entities
             _, entities = self._tier1_regex(text, lambda x: x, boost, aggressive, confidence_threshold)
-            # Pass 2: encode concurrently
             if entities:
                 vals = [e["value"] for e in entities]
                 tokens = await asyncio.gather(*[_encode(v) for v in vals])
-                # Replace from right to left
                 entities.sort(key=lambda x: x.get("start", 0), reverse=True)
                 for i, e in enumerate(reversed(entities)):
                     idx = len(entities) - 1 - i
@@ -425,7 +592,7 @@ class PresidioScanner:
         if not text or not isinstance(text, str):
             return []
 
-        pipeline = pipeline or ["regex", "checksum", "nlp"]
+        pipeline = pipeline or ["dlp", "regex", "checksum", "nlp"]
         if encode_fn is None:
             from mask_privacy.core.vault import aencode
             _encode = aencode
@@ -437,6 +604,18 @@ class PresidioScanner:
 
         remaining = text
 
+        if "dlp" in pipeline:
+            _, tier0 = self._tier0_dlp_heuristic(remaining, lambda x: x, confidence_threshold)
+            if tier0:
+                vals = [e["value"] for e in tier0]
+                tokens = await asyncio.gather(*[_encode(v) for v in vals])
+                for i, t in enumerate(tokens):
+                    tier0[i]["masked_value"] = t
+                all_entities.extend(tier0)
+                tier0_sorted = sorted(tier0, key=lambda x: x["start"], reverse=True)
+                for e in tier0_sorted:
+                    remaining = remaining[:e["start"]] + e["masked_value"] + remaining[e["end"]:]
+
         if "regex" in pipeline or "checksum" in pipeline:
             _, tier1 = self._tier1_regex(remaining, lambda x: x, boost, aggressive, confidence_threshold)
             if tier1:
@@ -445,7 +624,6 @@ class PresidioScanner:
                 for i, t in enumerate(tokens):
                     tier1[i]["masked_value"] = t
                 all_entities.extend(tier1)
-                # Apply replacements to 'remaining' to avoid double-detection in NLP
                 tier1_sorted = sorted(tier1, key=lambda x: x["start"], reverse=True)
                 for e in tier1_sorted:
                     remaining = remaining[:e["start"]] + e["masked_value"] + remaining[e["end"]:]
@@ -469,11 +647,12 @@ class PresidioScanner:
         from concurrent.futures import TimeoutError as FuturesTimeoutError
         from mask_privacy.core.exceptions import MaskNLPTimeout
 
-        timeout = float(os.environ.get("MASK_NLP_TIMEOUT_SECONDS", "60"))
+        timeout = config.MASK_NLP_TIMEOUT_SECONDS
         entities: List[Dict] = []
 
+        lang = _dlp_lang_resolver.resolve(text)
         pool = _get_scanner_pool()
-        future = pool.submit(_run_analyzer, text, self._supported_entities)
+        future = pool.submit(_run_analyzer, text, self._supported_entities, lang)
         
         # Convert to asyncio future
         loop = asyncio.get_event_loop()
@@ -642,10 +821,9 @@ def get_scanner() -> PresidioScanner:
     if _scanner_instance is None:
         with _scanner_lock:
             if _scanner_instance is None:
-                import os
-                scanner_type = os.environ.get("MASK_SCANNER_TYPE", "local").lower()
+                scanner_type = config.MASK_SCANNER_TYPE
                 if scanner_type == "remote":
-                    url = os.environ.get("MASK_SCANNER_URL", "http://localhost:5001/analyze")
+                    url = config.MASK_SCANNER_URL
                     _scanner_instance = RemotePresidioScanner(url)
                 else:
                     _scanner_instance = PresidioScanner()

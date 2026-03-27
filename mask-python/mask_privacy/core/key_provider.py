@@ -16,11 +16,11 @@ Usage::
     set_key_provider(AwsKmsKeyProvider(key_id="alias/mask-key"))
 """
 
-import os
 import logging
 import threading
 from abc import ABC, abstractmethod
 from typing import Optional
+from mask_privacy import config
 
 logger = logging.getLogger("mask.key_provider")
 
@@ -52,8 +52,8 @@ class EnvKeyProvider(BaseKeyProvider):
     """
 
     def get_encryption_key(self) -> Optional[str]:
-        key = os.environ.get("MASK_ENCRYPTION_KEY")
-        if not key and os.environ.get("MASK_STRICT_PROD") == "true":
+        key = config.MASK_ENCRYPTION_KEY
+        if not key and config.MASK_STRICT_PROD:
             raise RuntimeError(
                 "MASK_STRICT_PROD is enabled but MASK_ENCRYPTION_KEY is not set. "
                 "The SDK is configured to Fail-Shut when keys are missing in production environments."
@@ -61,10 +61,7 @@ class EnvKeyProvider(BaseKeyProvider):
         return key
 
     def get_master_key(self) -> Optional[str]:
-        key = os.environ.get("MASK_MASTER_KEY", "")
-        if not key:
-            key = os.environ.get("MASK_ENCRYPTION_KEY", "")
-        return key or None
+        return config.MASK_MASTER_KEY or None
 
 
 # Stub providers for enterprise key management services
@@ -99,7 +96,7 @@ class AwsKmsKeyProvider(BaseKeyProvider):
 
     def get_encryption_key(self) -> Optional[str]:
         # Mode 1: Envelope Encryption (EDK in environment)
-        edk_b64 = os.environ.get("MASK_ENCRYPTED_KEY")
+        edk_b64 = config.MASK_ENCRYPTED_KEY
         if edk_b64:
             try:
                 import base64
@@ -116,7 +113,7 @@ class AwsKmsKeyProvider(BaseKeyProvider):
                 raise
 
         # Fail-Shut enforcement: envelope encryption is required if strict mode is enabled or not dev mode
-        if os.environ.get("MASK_STRICT_PROD") == "true" or os.environ.get("MASK_DEV_MODE") != "true":
+        if config.MASK_STRICT_PROD or not config.MASK_DEV_MODE:
             raise RuntimeError(
                 "MASK_ENCRYPTED_KEY is not set. "
                 "Envelope encryption via KMS is required in production environments. "
@@ -168,7 +165,7 @@ class HashiCorpVaultProvider(BaseKeyProvider):
     def __init__(self, vault_addr: str, secret_path: str = "secret/data/mask", token: Optional[str] = None) -> None:
         self.vault_addr = vault_addr
         self.secret_path = secret_path
-        self.token = token or os.environ.get("VAULT_TOKEN")
+        self.token = token or config.VAULT_TOKEN
         self._client = None
 
     def _get_client(self):

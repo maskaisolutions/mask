@@ -58,11 +58,11 @@ class TestFailStrategyOpen:
 
 
 class TestFailStrategyDefault:
-    """Default behaviour (no env var) should be 'open'."""
+    """Default behaviour (no env var) should be 'closed'."""
 
     def test_default_is_open(self):
         from mask_privacy.core.vault import _get_fail_strategy
         with patch.dict(os.environ, {}, clear=False):
             if "MASK_FAIL_STRATEGY" in os.environ:
                 del os.environ["MASK_FAIL_STRATEGY"]
-            assert _get_fail_strategy() == "open"
+            assert _get_fail_strategy() == "closed"

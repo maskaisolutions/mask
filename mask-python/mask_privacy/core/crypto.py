@@ -16,6 +16,7 @@ import base64
 import secrets
 import threading
 from typing import Optional
+from mask_privacy import config
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -41,8 +42,9 @@ class CryptoEngine:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._init()
+                    instance = super().__new__(cls)
+                    instance._init()
+                    cls._instance = instance
         return cls._instance
 
     @classmethod
@@ -55,15 +57,16 @@ class CryptoEngine:
 
         The encryption key is retrieved from the active ``KeyProvider``.
         If no key is available, a throwaway key is auto-generated ONLY
-        when ``MASK_DEV_MODE=true`` is explicitly set.
+        when ``config.MASK_DEV_MODE=true`` is explicitly set.
         """
         from mask_privacy.core.key_provider import get_key_provider
 
         provider = get_key_provider()
         key = provider.get_encryption_key()
         if not key:
-            if os.environ.get("MASK_DEV_MODE") == "true":
+            if config.MASK_DEV_MODE:
                 key = secrets.token_hex(32)
+                # Side effect for any remaining direct os.environ checks (legacy)
                 os.environ["MASK_ENCRYPTION_KEY"] = key
                 logger.warning(
                     "MASK_DEV_MODE is enabled. Using a generated throwaway key. "
@@ -88,7 +91,7 @@ class CryptoEngine:
         # Derive a separate secret for blind indexing (HMAC-SHA256)
         # We derive it from the master encryption key so we don't need a 3rd env var.
         master_key = provider.get_master_key() or key
-        salt = os.environ.get("MASK_BLIND_INDEX_SALT", "mask-blind-index").encode()
+        salt = config.MASK_BLIND_INDEX_SALT.encode()
         self._index_secret = hmac.new(
             master_key.encode("utf-8"), salt, hashlib.sha256
         ).digest()
@@ -154,7 +157,7 @@ class CryptoEngine:
             return aesgcm.decrypt(iv, python_format_ciphertext, None).decode("utf-8")
         except Exception as e:
             from mask_privacy.core.exceptions import MaskDecryptionError
-            logger.error("Failed to decrypt vault payload. Check your MASK_ENCRYPTION_KEY.")
+            logger.error("Failed to decrypt vault payload. Check your config.MASK_ENCRYPTION_KEY.")
             raise MaskDecryptionError("Decryption failed") from e
 
 

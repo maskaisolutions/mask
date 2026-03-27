@@ -9,7 +9,7 @@
  * Provides the SOC2 / HIPAA audit trail.
  */
 
-import * as process from 'process';
+import { config } from '../config';
 import { looksLikeToken } from '../core/fpe_utils';
 
 // ---------------------------------------------------------------------------
@@ -20,7 +20,7 @@ const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
 type LogLevel = keyof typeof LOG_LEVELS;
 
 function _getLogLevel(): LogLevel {
-  const env = (process.env.MASK_LOG_LEVEL || 'info').toLowerCase();
+  const env = config.MASK_LOG_LEVEL;
   return (env in LOG_LEVELS) ? env as LogLevel : 'info';
 }
 
@@ -122,8 +122,8 @@ export class AuditLogger {
     private _shutdownRegistered: boolean = false;
 
     private constructor() {
-        this._maxBufferSize = parseInt(process.env.MASK_AUDIT_MAX_BUFFER_SIZE || "5000");
-        this._strictMode = process.env.MASK_AUDIT_LOG_STRICT === 'true';
+        this._maxBufferSize = config.MASK_AUDIT_MAX_BUFFER_SIZE;
+        this._strictMode = config.MASK_AUDIT_LOG_STRICT;
     }
 
     public static getInstance(): AuditLogger {

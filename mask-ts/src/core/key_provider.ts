@@ -15,7 +15,7 @@
  *     setKeyProvider(new AwsKmsKeyProvider("alias/mask-key"));
  */
 
-import * as process from 'process';
+import { config } from '../config';
 
 /**
  * Interface that all key providers must implement.
@@ -44,8 +44,8 @@ export abstract class BaseKeyProvider {
  */
 export class EnvKeyProvider extends BaseKeyProvider {
   async getEncryptionKey(): Promise<string | null> {
-    const key = process.env.MASK_ENCRYPTION_KEY || null;
-    if (!key && process.env.MASK_STRICT_PROD === 'true') {
+    const key = config.MASK_ENCRYPTION_KEY;
+    if (!key && config.MASK_STRICT_PROD) {
       throw new Error(
         "MASK_STRICT_PROD is enabled but MASK_ENCRYPTION_KEY is not set. " +
         "The SDK is configured to fail-shut when keys are missing in production environments."
@@ -55,10 +55,7 @@ export class EnvKeyProvider extends BaseKeyProvider {
   }
 
   async getMasterKey(): Promise<string | null> {
-    let key = process.env.MASK_MASTER_KEY || "";
-    if (!key) {
-      key = process.env.MASK_ENCRYPTION_KEY || "";
-    }
+    let key = config.MASK_MASTER_KEY;
     return key || null;
   }
 }
@@ -100,7 +97,7 @@ export class AwsKmsKeyProvider extends BaseKeyProvider {
    */
   async getEncryptionKey(): Promise<string | null> {
     // Envelope encryption path: decrypt a wrapped DEK via KMS
-    const encryptedKey = process.env.MASK_ENCRYPTED_KEY;
+    const encryptedKey = config.MASK_ENCRYPTED_KEY;
     if (encryptedKey) {
       try {
         const { DecryptCommand } = require("@aws-sdk/client-kms");
@@ -120,7 +117,8 @@ export class AwsKmsKeyProvider extends BaseKeyProvider {
     }
 
     // In strict production mode or non-dev mode, envelope encryption is required
-    if (process.env.MASK_STRICT_PROD === 'true' || process.env.MASK_DEV_MODE !== 'true') {
+    // In strict production mode or non-dev mode, envelope encryption is required
+    if (config.MASK_STRICT_PROD || !config.MASK_DEV_MODE) {
       throw new Error(
         'MASK_ENCRYPTED_KEY is not set. ' +
         'Envelope encryption via KMS is required in production modes. ' +
@@ -188,7 +186,7 @@ export class HashiCorpVaultProvider extends BaseKeyProvider {
 
   constructor(public readonly vaultAddr: string, public readonly secretPath: string = "secret/data/mask", token?: string) {
     super();
-    this._token = token || process.env.VAULT_TOKEN;
+    this._token = token || config.VAULT_TOKEN || undefined;
   }
 
   async getEncryptionKey(): Promise<string | null> {

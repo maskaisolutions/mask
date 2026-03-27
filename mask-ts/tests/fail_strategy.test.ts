@@ -81,9 +81,9 @@ describe('TestFailStrategy', () => {
     });
 
     describe('TestFailStrategyDefault', () => {
-        test('test_default_is_open', () => {
+        test('test_default_is_closed', () => {
             delete process.env.MASK_FAIL_STRATEGY;
-            expect(_getFailStrategy()).toBe("open");
+            expect(_getFailStrategy()).toBe("closed");
         });
     });
 });

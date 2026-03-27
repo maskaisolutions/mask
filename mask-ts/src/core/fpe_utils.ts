@@ -15,6 +15,10 @@ export const TOKEN_PATTERN = new RegExp(
   "|000-00-\\d{4}" +                            // SSN
   "|4000-0000-0000-\\d{4}" +                    // CC
   "|000000\\d{3}" +                             // Routing
+  "|990000\\d{4}[02468]" +                      // Turkish TCID token
+  "|100000\\d{4}" +                             // Saudi NID token
+  "|784-0000-\\d{7}-\\d" +                       // UAE EID token
+  "|[A-Z]{2}00[A-F0-9]{4,16}" +                // IBAN token
   "|\\[TKN-[a-f0-9]{8,64}\\]",                  // Opaque
   "g"
 );
@@ -51,6 +55,26 @@ export function looksLikeToken(value: string | any): boolean {
     return true;
   }
 
+  // UAE Emirates ID tokens: 784-0000-XXXXXXX-X
+  if (v.startsWith("784-0000-") && v.length === 18) {
+    return true;
+  }
+
+  // Turkish TCID tokens: 990000XXXX(even)
+  if (v.length === 11 && v.startsWith("990000") && /^\d+$/.test(v) && parseInt(v[v.length - 1], 10) % 2 === 0) {
+    return true;
+  }
+
+  // Saudi NID tokens: 100000XXXX
+  if (v.length === 10 && v.startsWith("100000") && /^\d+$/.test(v)) {
+    return true;
+  }
+
+  // IBAN tokens: XX00... (zero check digits indicate synthetic)
+  if (/^[A-Z]{2}00[A-F0-9]{4,16}$/.test(v)) {
+    return true;
+  }
+
   // Opaque fallback tokens: [TKN-<hex>]
   if (v.startsWith("[TKN-") && v.endsWith("]")) {
     return true;
@@ -58,3 +82,4 @@ export function looksLikeToken(value: string | any): boolean {
 
   return false;
 }
+

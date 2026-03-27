@@ -61,6 +61,76 @@ The Data Plane is the open-source, transparent, auditable runtime execution laye
 
 ---
 
+## Heuristic-First DLP Architecture
+
+Mask implements a **3-tier Waterfall Detection Pipeline** that maximises speed and accuracy by running the cheapest, most deterministic checks first:
+
+| Tier | Method | Speed | Description |
+|------|--------|-------|-------------|
+| **0 — DLP Heuristic** | Regex + Checksum + Proximity Scoring | ⚡ Fastest | 50+ structured patterns with hard-validation (Luhn, IBAN Mod-97, Turkish TCID, Saudi NID) and proximity-weighted confidence boosting. |
+| **1 — Deterministic Regex** | Format-specific regex | ⚡ Fast | Legacy email, phone, SSN, CC patterns with ABA/Luhn checksums. |
+| **2 — Probabilistic NLP** | Transformer models (spaCy / HuggingFace) | 🐢 Slow | Catches unstructured entities (names, organisations) that regex cannot identify. |
+
+### How the Waterfall Actually Works: The Excising Mechanism
+
+To maintain high performance, Mask does not simply run three separate scans. It uses a **Sequential Mutation** strategy:
+
+1.  **Tier 0 & 1 (The Scouts):** The SDK first runs the high-speed DLP and Regex engines.
+2.  **Immediate Tokenization:** Any PII found by these tiers is **immediately replaced** by a token in the string buffer.
+3.  **Tier 2 (The Heavy Infantry):** The expensive NLP engine (Transformer/spaCy) only scans the *remaining* text. Because the PII has already been "excised" (cut out and replaced with tokens), the NLP engine doesn't waste compute on data that has already been accurately identified.
+4.  **Bypass Logic:** All tiers are "token-aware." If a scan encounters a string that is already a Mask token, it skips it entirely, preventing redundant processing or "double-tokenization."
+
+### Multilingual Support
+
+Mask provides high-performance PII detection across **8 major languages** (EN, ES, FR, DE, TR, AR, JA, ZH). 
+
+Our 3-tier waterfall pipeline is designed to be language-aware, using a combination of locale-specific regex patterns and optimized NLP models.
+
+[**Read the Multilingual Support Guide**](MULTILINGUAL.md) for detailed technical nuances, model setup, and latency benchmarks.
+
+---
+
+### Multilingual Detection
+
+The DLP pipeline includes a **Language Context Resolver** that uses Unicode-block heuristics to detect 8 languages before selecting locale-specific patterns:
+
+| Language | Detection Method | Locale-Specific Patterns |
+|----------|-----------------|-------------------------|
+| English (default) | Latin-only fallback | Standard US/UK PII |
+| Turkish | `ğ`, `ı`, `İ`, `ş`, `Ş` | T.C. Kimlik No, Turkish addresses (Cad/Sok/Mah), Turkish honorifics (Bay/Bayan/Sayın) |
+| Arabic | `\u0600-\u06FF` | Saudi National ID, UAE Emirates ID, Arabic addresses (شارع/حي), Arabic names |
+| Spanish | `ñ`, `¡`, `¿` | Spanish honorifics (Sr/Sra/Srta) |
+| French | `à`, `â`, `ç`, `é`, `è` | French addresses (rue/avenue/boulevard), INSEE number |
+| German | `ä`, `ö`, `ü`, `ß` | Steuer-ID, German addresses (straße/weg/platz) |
+| Chinese | CJK Unified Ideographs | Romanized Pinyin names |
+| Japanese | Hiragana / Katakana | Romanized surname detection |
+
+
+### Proximity-Weighted Confidence Scoring
+
+Each candidate match is scored using a logarithmic-decay proximity model:
+
+```
+confidence = baseRisk + Σ(keywordBoost / (1 + ln(1 + distance)))
+```
+
+Where `distance` is the character offset between match and each context keyword. This ensures that an ambiguous pattern (e.g., a 9-digit number) only triggers as sensitive data when relevant keywords like "routing" or "bank" appear nearby.
+
+### 50+ Supported Data Types
+
+| Category | Types |
+|----------|-------|
+| **Financial** | US SSN, Credit Card (Visa/MC/Amex/Discover), IBAN, SWIFT/BIC, ABA Routing, Bank Account, Bitcoin, Ethereum |
+| **Contact** | Email, Phone (US/Intl incl. TR/SA/UAE), IPv4, IPv6, MAC Address |
+| **Personal** | Date of Birth, US Driver's License, US Passport |
+| **Identity (US)** | EIN/Tax ID |
+| **Identity (Intl)** | UK NINO, Canadian SIN, French INSEE, German Steuer-ID, Turkish T.C. Kimlik, Saudi National ID, UAE Emirates ID |
+| **Vehicle** | VIN (with check-digit validation), License Plate |
+| **Healthcare** | Medical Record ID, Medicare ID, DEA Number, NPI Number |
+| **Corporate** | Employee ID |
+
+---
+
 ## Internal Architecture
 
 The SDKs are designed for multi-tenant, zero-trust environments.
@@ -76,6 +146,12 @@ Mask prevents the misidentification of real data as tokens by using universally 
 * Credit Card tokens use the `4000-0000-0000` Visa reserved test BIN. 
 
 This prefix-based approach ensures that the SDK does not inadvertently process valid PII as an existing token.
+
+Additional collision-proof prefixes are used for international identifiers:
+* Turkish TCID tokens use the `990000` prefix (no valid Kimlik number starts with `99`).
+* Saudi NID tokens use the `100000` prefix (distinct from real `1XXXXXXXXX` sequences via length constraint).
+* UAE Emirates ID tokens use the `784-0000-` prefix (zeroed sub-fields are structurally invalid).
+* IBAN tokens zero the check digits (`XX00...`), which always fails ISO 7064 Mod-97 verification.
 
 ### 3. Pluggable Key Management (Enterprise KMS)
 Mask supports a pluggable `BaseKeyProvider` architecture across all SDK languages. This allows enterprises to fetch encryption keys dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault at runtime, rather than relying on static environment variables.
@@ -106,9 +182,44 @@ For detailed installation instructions, including optional extras for Redis, Dyn
 
 ---
 
+## Security Guardrails: Fail-Shut by Default
+
+To protect sensitive data in production, Mask SDKs use a **Fail-Shut** strategy by default.
+
+> [!IMPORTANT]
+> **Secure by Default:** If a vault (Redis, DynamoDB) or a Key Provider is unreachable, the SDK will **halt and throw an error** rather than returning plaintext PII.
+>
+> **Development Mode:** To enable "Fail-Open" behavior (where the SDK gracefully returns original text on failure), you **must** explicitly set the environment variable: `MASK_ENV=dev`.
+
+### Model Pre-caching (Air-Gapped Support)
+
+Mask uses large NLP models for PII detection. In production or air-gapped environments where internet access is restricted, use the built-in CLI to pre-download models:
+
+- **Python**: `python -m mask_privacy.cli cache-models --languages en,es`
+- **TypeScript**: `npx ts-node src/cli.ts cache-models --languages en,es`
+
+---
+
 ## Production Configuration
 
-Mask SDKs support enterprise-grade deployments with high throughput. To guarantee strict privacy compliance (e.g., SOC2, HIPAA), configure the following environment variables for production environments:
+Mask SDKs support enterprise-grade deployments with high throughput. All configuration is managed via environment variables for zero-code portability.
+
+### Where to set environment variables?
+You have three common options for configuring the SDK:
+
+1.  **In a `.env` file (Recommended)**: Create a file named `.env` in your project root.
+    ```env
+    MASK_LANGUAGES="es,en"
+    MASK_ENCRYPTION_KEY="your-key"
+    ```
+2.  **In your Terminal**:
+    *   **Bash**: `export MASK_LANGUAGES="es,en"`
+    *   **PowerShell**: `$env:MASK_LANGUAGES="es,en"`
+3.  **Directly in Python/JS**:
+    *   **Python**: `os.environ["MASK_LANGUAGES"] = "es,en"`
+    *   **Node.js**: `process.env.MASK_LANGUAGES = "es,en"`
+
+### Key Configuration Variables
 
 - `MASK_FAIL_STRATEGY=closed`: Forces the SDK to halt if the Vault or Key Provider is unreachable. The `open` strategy will return plaintext PII, which is intended for local prototyping.
 - `MASK_AUDIT_LOG_STRICT=true`: Enforces backpressure on the Audit Logger. If the telemetry buffer fills up, the SDK will block operations until the logs are flushed.

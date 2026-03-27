@@ -12,6 +12,7 @@ import { withTimeout } from './timeout';
 import { MaskNLPTimeout } from './exceptions';
 import * as path from 'path';
 import * as os from 'os';
+import { config } from '../config';
 
 let Piscina: any;
 try {
@@ -25,9 +26,21 @@ export class LocalTransformersScanner extends BaseScanner {
   private _modelName: string;
   private _warmupPromise: Promise<void> | null = null;
 
-  constructor(modelName: string = 'Xenova/distilbert-base-uncased-ner-simple') {
+  constructor(modelName?: string) {
     super();
-    this._modelName = modelName;
+    if (modelName) {
+      this._modelName = modelName;
+    } else if (config.MASK_NLP_MODEL) {
+      this._modelName = config.MASK_NLP_MODEL;
+    } else {
+      const langs = config.MASK_LANGUAGES.split(',').map(l => l.trim().toLowerCase());
+      const needsMultilingual = langs.some(l => l !== 'en');
+      if (needsMultilingual) {
+        this._modelName = 'Xenova/bert-base-multilingual-cased-ner-hrl';
+      } else {
+        this._modelName = 'Xenova/distilbert-base-uncased-ner-simple';
+      }
+    }
     // Eagerly start the worker pool and pre-warm the model
     this._warmupPromise = this._initPool();
   }
@@ -56,7 +69,7 @@ export class LocalTransformersScanner extends BaseScanner {
       });
 
       // Pre-warm: run a dummy inference to force model download/load
-      const cacheDir = process.env.MASK_MODEL_CACHE_DIR;
+      const cacheDir = config.MASK_MODEL_CACHE_DIR;
       console.info(`[NLP Pool] Pre-warming ${maxThreads} worker(s) with model: ${this._modelName}${cacheDir ? ` (cache: ${cacheDir})` : ''}`);
       try {
         await this._pool.run({ text: 'warmup', modelName: this._modelName, cacheDir });
@@ -93,12 +106,12 @@ export class LocalTransformersScanner extends BaseScanner {
     // Ensure pool is initialized (waits for pre-warm if still in progress)
     await this._warmupPromise;
 
-    const timeoutSec = parseInt(process.env.MASK_NLP_TIMEOUT_SECONDS || "30");
+    const timeoutSec = config.MASK_NLP_TIMEOUT_SECONDS;
     const timeoutMs = timeoutSec * 1000;
 
     try {
       const ac = new AbortController();
-      const cacheDir = process.env.MASK_MODEL_CACHE_DIR;
+      const cacheDir = config.MASK_MODEL_CACHE_DIR;
       const results = await withTimeout(
         this._pool.run({ text, modelName: this._modelName, cacheDir }, { signal: ac.signal }),
         timeoutMs,

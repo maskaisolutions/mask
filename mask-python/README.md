@@ -104,6 +104,95 @@ Mask includes the ability to detokenize PII embedded within larger text blocks (
 - **Probabilistic Vault Cleanup**: `MemoryVault` uses a probabilistic $O(1)$ cleanup strategy to avoid $O(N)$ blocking scans. Frequency is configurable via `MASK_VAULT_CLEANUP_FREQUENCY`.
 - **Thread-Safe Singletons**: Core accessors for `Vault`, `KeyProvider`, and `Scanner` are thread-safe and lazily initialized, preventing race conditions during high-concurrency app startup.
 
+## Multilingual PII Detection (Waterfall Pipeline)
+
+Mask is built for the global enterprise. While many privacy tools are English-centric, Mask implements a **3-Tier Waterfall Detection** strategy designed for high-performance PII detection across 8 major languages.
+
+### Supported Language Matrix
+
+Mask provides first-class support for the following languages:
+
+| Language | Code | Tier 0 (DLP) | Tier 2 (NLP Engine) |
+| :--- | :--- | :--- | :--- |
+| **English** | `en` | ✅ Full | spaCy (`en_core_web_sm`) |
+| **Spanish** | `es` | ✅ Full | spaCy (`es_core_news_sm`) |
+| **French** | `fr` | ✅ Full | spaCy (`fr_core_news_sm`) |
+| **German** | `de` | ✅ Full | spaCy (`de_core_news_sm`) |
+| **Turkish** | `tr` | ✅ Full | spaCy (`tr_core_news_trf`) |
+| **Arabic** | `ar` | ✅ Full | Transformers (`bert-base-multilingual`) |
+| **Japanese** | `ja` | ✅ Full | spaCy (`ja_core_news_sm`) |
+| **Chinese** | `zh` | ✅ Full | spaCy (`zh_core_web_sm`) |
+
+### How the Waterfall Works: The Excising Mechanism
+
+To maintain high performance, the Python SDK does not simply run three separate scans. It uses a **Sequential Mutation** strategy:
+
+1.  **Tier 0 & 1 (The Scouts):** The SDK first runs the high-speed DLP and Regex engines.
+2.  **Immediate Tokenization:** Any PII found by these tiers is **immediately replaced** by a token in the string buffer.
+3.  **Tier 2 (The Heavy Infantry):** The expensive NLP engine (spaCy/Transformers) only scans the *remaining* text. Because the PII has already been "excised" (cut out and replaced with tokens), the NLP engine doesn't waste compute on data already identified.
+4.  **Bypass Logic:** All tiers are "token-aware." If a scan encounter a string that is already a Mask token, it skips it entirely, preventing redundant processing or "double-tokenization."
+
+---
+
+### Configuration & Environment Variables
+
+Configure your multilingual environment using standard variables. These are parsed at runtime by the internal `NlpEngineProvider`.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `MASK_LANGUAGES` | `en` | Comma-separated list of supported languages (e.g., `en,es,fr,ar`). |
+| `MASK_NLP_ENGINE` | `spacy` | Options: `spacy` or `transformers`. Arabic always forces `transformers`. |
+| `MASK_NLP_MODEL` | *(varies)* | Override the default model (e.g., `Davlan/bert-base-multilingual-cased-ner-hrl`). |
+| `MASK_NLP_MAX_WORKERS` | `4` | Number of worker processes to spawn for parallel NLP analysis. |
+| `MASK_NLP_TIMEOUT_SECONDS` | `60.0` | Max duration for a single NLP scan before returning original text. |
+| `MASK_DYNAMODB_MAX_SOCKETS` | `50` | Max concurrent HTTP sockets for DynamoDB (parity with TS). |
+
+---
+
+### Installation & Model Management
+
+#### 1. Basic Installation
+```bash
+pip install "mask-privacy[spacy]"
+```
+
+#### 2. Pre-loading Models (Required for Production)
+Mask will attempt to load the best available model on your system. For predictable results in production/CI, you **must** download the models explicitly:
+
+```bash
+# English (Default)
+python -m spacy download en_core_web_md
+
+# Spanish support
+python -m spacy download es_core_news_md
+
+# French support
+python -m spacy download fr_core_news_md
+```
+
+#### 3. Arabic Support (Transformers)
+If you include `ar` in `MASK_LANGUAGES`, Mask automatically initializes a Transformers pipeline. No manual spaCy download is required for Arabic, but ensure you have enough RAM (~1GB) for the model.
+
+---
+
+### Performance Tuning for Multilingual Use
+
+#### Process Isolation (Avoiding the GIL)
+NLP tasks are CPU-bound and can block the Python Global Interpreter Lock (GIL). Mask solves this by running the `AnalyzerEngine` in a persistent **Process Pool**. 
+
+If you are running on a high-core machine, increase parallelism:
+```bash
+export MASK_NLP_MAX_WORKERS=16
+```
+
+#### Latency Benchmarks (Avg. Overhead)
+- **DLP Heuristics:** < 5ms
+- **spaCy (Local):** 150ms - 300ms
+- **Transformers (Local):** 400ms - 900ms
+- **Remote Scanner:** 20ms - 50ms (plus network RTT)
+
+---
+
 ## Installation and Setup
 
 Install the Data Plane core SDK. Core features require cryptography and Presidio; Redis/Dynamo/Memcached/LangChain/LlamaIndex/ADK remain optional extras:
@@ -122,23 +211,19 @@ pip install "mask-privacy[adk]"         # For Google ADK hooks
 ```
 
 
-### Installing AI Models
-Mask uses powerful NLP engines for PII detection. Install the `spacy` extra and then download your preferred model:
+### Installing AI Models (Production Ready)
+For production environments, air-gapped clusters, or to avoid cold-start latency, use the built-in CLI to pre-cache all required models:
+
 ```bash
 # 1. Install with spaCy support
 pip install "mask-privacy[spacy]"
 
-# 2. Download the NLP model (choose one)
-python -m spacy download en_core_web_sm  # Small (~12MB, Fast)
-python -m spacy download en_core_web_md  # Standard (~40MB, Balanced)
-python -m spacy download en_core_web_lg  # Large (~560MB, High Accuracy)
+# 2. Use the CLI to download models for your required languages
+export MASK_LANGUAGES="en,es,fr"
+python -m mask_privacy.cli cache-models
 ```
 
-For a typical production environment, you might combine extras:
-```bash
-pip install "mask-privacy[spacy,redis]"
-python -m spacy download en_core_web_lg
-```
+This is the preferred method instead of manual `spacy download` calls, as it ensures compatibility with the SDK's internal engine configuration.
 
 
 ### Async & Remote Scanner Support
@@ -150,6 +235,25 @@ pip install "mask-privacy[remote]"
 ### Environment Configuration
 
 Before running your agents, Mask requires an encryption key and a vault backend selection.
+
+#### Where to set these?
+Select the method that best fits your deployment:
+
+1.  **In a `.env` file (Recommended)**: Create a file in your project root.
+    ```env
+    MASK_LANGUAGES="es,en"
+    MASK_ENCRYPTION_KEY="your-key"
+    ```
+    Then load it using `load_dotenv()` from `python-dotenv`.
+2.  **In your Terminal**:
+    *   **Bash**: `export MASK_LANGUAGES="es,en"`
+    *   **PowerShell**: `$env:MASK_LANGUAGES="es,en"`
+3.  **Directly in Python**:
+    ```python
+    import os
+    os.environ["MASK_LANGUAGES"] = "es,en"
+    # Ensure this happens BEFORE importing mask_privacy components
+    ```
 
 #### 1. Configure Key Source
 By default, Mask reads from environment variables.
@@ -170,6 +274,25 @@ For zero-trust environments, Mask supports a pluggable `BaseKeyProvider` archite
 # Options: local (default), remote
 export MASK_SCANNER_TYPE=remote
 export MASK_SCANNER_URL=http://presidio-analyzer:5001/analyze
+```
+
+#### 1. Security Guardrails: Fail-Shut by Default
+
+To prevent accidental data leakage, Mask defaults to a **Fail-Shut** strategy. If the Vault or Key Provider is unreachable, the SDK will raise a `MaskVaultConnectionError`.
+
+> [!IMPORTANT]
+> **Environment Modes:**
+> - **Production (Default):** Fail-Shut enabled. Strictly protects PII.
+> - **Development:** Set `MASK_ENV=dev` to allow "Fail-Open" behavior (PII is returned as-is if the vault fails).
+
+#### 2. Model Pre-caching CLI
+
+For production air-gapped environments or to avoid "cold-start" latency, use the model pre-caching tool:
+
+```bash
+# Cache English and Spanish models to a specific directory
+export MASK_MODEL_CACHE_DIR="./models"
+python -m mask_privacy.cli cache-models --languages en,es --engine presidio
 ```
 
 #### 3. Select vault type
@@ -204,6 +327,16 @@ export MASK_VAULT_CLEANUP_FREQUENCY=0.05
 
 For production and staging environments, `MASK_ENCRYPTION_KEY` **must** be set;
 the SDK will not start without it.
+
+#### 5. DLP Pipeline Configuration (Optional)
+```bash
+# NLP scan timeout (seconds, default: 60.0)
+export MASK_NLP_TIMEOUT_SECONDS=15
+
+# Restrict DLP categories to scan (comma-separated; default: all)
+# Options: FINANCIAL, CONTACT, PERSONAL, HEALTHCARE, IDENTITY_US, IDENTITY_INTL, VEHICLE, CORPORATE
+# export MASK_DLP_CATEGORIES=FINANCIAL,IDENTITY_INTL
+```
 
 ---
 

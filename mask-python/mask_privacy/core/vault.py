@@ -15,6 +15,7 @@ from mask_privacy.core.crypto import get_crypto_engine
 from mask_privacy.core.exceptions import MaskVaultConnectionError, MaskDecryptionError
 from mask_privacy.telemetry.audit_logger import get_audit_logger
 from mask_privacy.core.search import BucketManager
+from mask_privacy import config
 
 class DecodeError(Exception):
     """Raised when a token cannot be decoded/decrypted."""
@@ -26,15 +27,18 @@ _STRATEGY_WARNED = False
 
 def _get_fail_strategy() -> str:
     global _STRATEGY_WARNED
-    strategy = os.environ.get("MASK_FAIL_STRATEGY", "").lower()
-    if not strategy:
-        if os.environ.get("MASK_STRICT_PROD") == "true":
-            return "closed"
+    if config.MASK_FAIL_STRATEGY:
+        return config.MASK_FAIL_STRATEGY
+        
+    # Secure-by-default: fail-shut unless explicitly in dev mode
+    if config.MASK_ENV in ["dev", "development"]:
         if not _STRATEGY_WARNED:
-            logger.warning("MASK_FAIL_STRATEGY is unset; defaulting to 'open'. PII may leak during vault failures.")
+            logger.warning("MASK_ENV is 'dev'; defaulting to 'open'. PII may leak during vault failures.")
             _STRATEGY_WARNED = True
         return "open"
-    return strategy
+    
+    # Default to closed for production/unset envs
+    return "closed"
 
 def _hash_plaintext(plaintext: str, secret: Optional[bytes] = None) -> str:
     """Deterministically hash plaintext for reverse lookups.
@@ -77,7 +81,7 @@ class MemoryVault(BaseVault):
         import random
         # Probabilistic cleanup to prevent memory bloat
         # Configurable frequency (default 1%) balances CPU vs Memory usage
-        cleanup_freq = float(os.environ.get("MASK_VAULT_CLEANUP_FREQUENCY", "0.01"))
+        cleanup_freq = config.MASK_VAULT_CLEANUP_FREQUENCY
         if random.random() > cleanup_freq:
             return
             
@@ -143,7 +147,7 @@ class RedisVault(BaseVault):
     def __init__(self, **options: Any):
         try:
             import redis
-            url = os.environ.get("MASK_REDIS_URL", "redis://localhost:6379/0")
+            url = config.MASK_REDIS_URL
             self._client = redis.from_url(url, decode_responses=True, **options)
             self._client.ping()
             logger.info("RedisVault connected to %s", url)
@@ -206,7 +210,7 @@ class AsyncRedisVault:
     def __init__(self, **options: Any):
         try:
             import redis.asyncio as aioredis
-            url = os.environ.get("MASK_REDIS_URL", "redis://localhost:6379/0")
+            url = config.MASK_REDIS_URL
             self._client = aioredis.from_url(url, decode_responses=True, **options)
             logger.info("AsyncRedisVault connected to %s", url)
         except Exception as e:
@@ -262,8 +266,8 @@ class DynamoDBVault(BaseVault):
     def __init__(self):
         try:
             import boto3
-            self._region = os.environ.get("MASK_DYNAMODB_REGION", "us-east-1")
-            self._table_name = os.environ.get("MASK_DYNAMODB_TABLE", "mask-vault")
+            self._region = config.MASK_DYNAMODB_REGION
+            self._table_name = config.MASK_DYNAMODB_TABLE
             self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
             self._table = self._dynamodb.Table(self._table_name)
             self._client = self._dynamodb.meta.client
@@ -375,8 +379,8 @@ class MemcachedVault(BaseVault):
     def __init__(self, **options: Any):
         try:
             from pymemcache.client.base import Client
-            host = os.environ.get("MASK_MEMCACHED_HOST", "localhost")
-            port = int(os.environ.get("MASK_MEMCACHED_PORT", "11211"))
+            host = config.MASK_MEMCACHED_HOST
+            port = config.MASK_MEMCACHED_PORT
             self._client = Client((host, port), **options)
             logger.info("MemcachedVault connected to %s:%s", host, port)
         except Exception as e:
@@ -431,7 +435,7 @@ class MemcachedVault(BaseVault):
 
 _vault_lock = threading.Lock()
 _vault_instance: Optional[BaseVault] = None
-DEFAULT_TTL = int(os.environ.get("MASK_VAULT_TTL", "600"))
+DEFAULT_TTL = config.MASK_VAULT_TTL
 
 def get_vault() -> BaseVault:
     """Return the active vault singleton (lazy-init, thread-safe)."""
@@ -439,7 +443,7 @@ def get_vault() -> BaseVault:
     if _vault_instance is None:
         with _vault_lock:
             if _vault_instance is None:
-                vault_type = os.environ.get("MASK_VAULT_TYPE", "memory").lower()
+                vault_type = config.MASK_VAULT_TYPE
         if vault_type == "redis":
             _vault_instance = RedisVault()
         elif vault_type == "dynamodb":
@@ -522,7 +526,7 @@ _async_vault_instance: Any = None
 def get_async_vault() -> Any:
     global _async_vault_instance
     if _async_vault_instance is None:
-        vault_type = os.environ.get("MASK_VAULT_TYPE", "memory").lower()
+        vault_type = config.MASK_VAULT_TYPE
         if vault_type == "redis":
             _async_vault_instance = AsyncRedisVault()
         else:

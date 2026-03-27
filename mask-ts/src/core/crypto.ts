@@ -11,7 +11,7 @@
  * Requires MASK_ENCRYPTION_KEY to be set in the environment.
  */
 
-import * as process from 'process';
+import { config } from '../config';
 import * as cryptoNode from 'crypto';
 import { getKeyProvider } from './key_provider';
 import { MaskDecryptionError } from './exceptions';
@@ -72,8 +72,9 @@ export class CryptoEngine {
     
     let key: string;
     if (!keyFromProvider) {
-      if (process.env.MASK_DEV_MODE === 'true') {
+      if (config.MASK_DEV_MODE) {
         key = cryptoNode.randomBytes(32).toString('base64');
+        // We can't easily write back to config exports, but we can update process.env for the legacy path below
         process.env.MASK_ENCRYPTION_KEY = key;
         console.warn(
           "MASK_DEV_MODE is enabled. Using a generated throwaway key. " +
@@ -97,7 +98,7 @@ export class CryptoEngine {
     // Derive a separate secret for blind indexing (HMAC-SHA256)
     // We derive it from the master encryption key so we don't need a 3rd env var.
     const masterKey = await provider.getMasterKey() || key;
-    const salt = process.env.MASK_BLIND_INDEX_SALT || "mask-blind-index";
+    const salt = config.MASK_BLIND_INDEX_SALT;
     this._indexSecret = cryptoNode.createHmac('sha256', masterKey).update(salt).digest();
   }
 
@@ -193,7 +194,7 @@ export class CryptoEngine {
       // Reconstruct the original Fernet key from our AES key
       // This won't work if the key was derived differently, but it's a best-effort compat layer
       const token = new fernet.Token({
-        secret: new fernet.Secret(process.env.MASK_ENCRYPTION_KEY || ''),
+        secret: new fernet.Secret(config.MASK_ENCRYPTION_KEY || process.env.MASK_ENCRYPTION_KEY || ''),
         token: ciphertext,
         ttl: 0
       });

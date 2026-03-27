@@ -6,14 +6,25 @@
  * tokens.
  *
  * Detection Architecture (Waterfall):
+ *   Tier 0 — DLP Heuristic: Multilingual, 50+ types, checksum validators
  *   Tier 1 — Deterministic: Regex + Checksum  (fast, provable, auditable)
  *   Tier 2 — Probabilistic: Local NLP via Transformers (catches names/orgs)
  */
 
-import * as process from 'process';
+import { config } from '../config';
 import { encode } from './vault';
 import { looksLikeToken } from './fpe_utils';
 import { MaskNLPTimeout } from './exceptions';
+import { LanguageContextResolver } from './dlp/assessor';
+import { DLPPatternRegistry } from './dlp/registry';
+import { DLPValidationEngine } from './dlp/handlers';
+import { DLPConfidenceScorer } from './dlp/scorer';
+
+// Module-level DLP singletons (created once, reused for all scans)
+const _dlpLanguageResolver = new LanguageContextResolver();
+const _dlpPatternRegistry = new DLPPatternRegistry();
+const _dlpValidationEngine = new DLPValidationEngine();
+const _dlpConfidenceScorer = new DLPConfidenceScorer();
 
 /** Regex patterns for Tier 1 deterministic detection */
 export const REGEX_PATTERNS: Record<string, RegExp> = {
@@ -70,6 +81,99 @@ export class BaseScanner {
     if (d.length !== 9) return false;
     const checksum = 3 * (d[0] + d[3] + d[6]) + 7 * (d[1] + d[4] + d[7]) + (d[2] + d[5] + d[8]);
     return checksum % 10 === 0;
+  }
+
+  protected async _tier0Dlp(
+    text: string,
+    encodeFn: (val: string) => Promise<string>,
+    confidenceThreshold: number,
+  ): Promise<[string, any[]]> {
+    const detectedLanguage = _dlpLanguageResolver.resolve(text);
+
+    type RawHit = { start: number; end: number; tag: string; val: string; conf: number };
+    const rawHits: RawHit[] = [];
+
+    // Pass 1: Structured patterns from the registry
+    for (const [typeTag, descriptor] of _dlpPatternRegistry.iterDescriptors()) {
+      const re = new RegExp(descriptor.compiledRe.source, descriptor.compiledRe.flags);
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        const matchedStr = m[0];
+        if (looksLikeToken(matchedStr)) continue;
+        const validatorResult = _dlpValidationEngine.run(descriptor.validatorTag, matchedStr);
+        const conf = _dlpConfidenceScorer.score({
+          baseRisk: descriptor.baseRisk,
+          matchStart: m.index,
+          matchEnd: m.index + matchedStr.length,
+          fullText: text,
+          proximityTerms: descriptor.proximityTerms,
+          validatorPassed: validatorResult,
+        });
+        if (conf >= confidenceThreshold) {
+          rawHits.push({ start: m.index, end: m.index + matchedStr.length, tag: typeTag, val: matchedStr, conf });
+        }
+      }
+    }
+
+    // Pass 2: Locale-tuned name patterns
+    const nameProximity = new Set(["name", "contact", "person", "nom", "isim", "اسم"]);
+    for (const nameRe of _dlpPatternRegistry.namePatternsFor(detectedLanguage)) {
+      const re = new RegExp(nameRe.source, nameRe.flags);
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        if (looksLikeToken(m[0])) continue;
+        const conf = _dlpConfidenceScorer.score({
+          baseRisk: 0.50,
+          matchStart: m.index,
+          matchEnd: m.index + m[0].length,
+          fullText: text,
+          proximityTerms: nameProximity,
+          validatorPassed: null,
+        });
+        if (conf >= confidenceThreshold) {
+          rawHits.push({ start: m.index, end: m.index + m[0].length, tag: "PERSON_NAME", val: m[0], conf });
+        }
+      }
+    }
+
+    // Pass 3: Locale-tuned address patterns
+    for (const addrRe of _dlpPatternRegistry.addressPatternsFor(detectedLanguage)) {
+      const re = new RegExp(addrRe.source, addrRe.flags);
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        if (looksLikeToken(m[0])) continue;
+        rawHits.push({ start: m.index, end: m.index + m[0].length, tag: "PHYS_ADDRESS", val: m[0], conf: 0.55 });
+      }
+    }
+
+    // De-duplicate overlapping spans — keep longer / higher-confidence match
+    rawHits.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start) || b.conf - a.conf);
+    const deduped: RawHit[] = [];
+    let occupiedEnd = -1;
+    for (const hit of rawHits) {
+      if (hit.start >= occupiedEnd) {
+        deduped.push(hit);
+        occupiedEnd = hit.end;
+      }
+    }
+
+    // Replace right-to-left to preserve offsets
+    const entities: any[] = [];
+    let excised = text;
+    for (const hit of [...deduped].reverse()) {
+      const token = await encodeFn(hit.val);
+      excised = excised.slice(0, hit.start) + token + excised.slice(hit.end);
+      entities.push({
+        type: hit.tag,
+        value: hit.val,
+        method: "dlp_heuristic",
+        confidence: hit.conf,
+        masked_value: token,
+        language: detectedLanguage,
+      });
+    }
+
+    return [excised, entities];
   }
 
   protected async _tier1Regex(
@@ -175,17 +279,24 @@ export class BaseScanner {
   ): Promise<string> {
     if (!text || typeof text !== 'string') return text;
 
-    const pipeline = options.pipeline || ["regex", "checksum", "nlp"];
+    const pipeline = options.pipeline || ["dlp", "regex", "checksum", "nlp"];
     const _encode = options.encodeFn || encode;
     const confidenceThreshold = options.confidenceThreshold ?? 0.7;
     const boost = this._resolveBoost(options.context);
 
     let currentText = text;
 
+    // --- Tier 0: DLP Heuristic (multilingual, 50+ types) ---
+    if (pipeline.includes("dlp")) {
+      [currentText] = await this._tier0Dlp(currentText, _encode, confidenceThreshold);
+    }
+
+    // --- Tier 1: Deterministic ---
     if (pipeline.includes("regex") || pipeline.includes("checksum")) {
       [currentText] = await this._tier1Regex(currentText, _encode, boost, !!options.aggressive, confidenceThreshold);
     }
 
+    // --- Tier 2: Probabilistic ---
     if (pipeline.includes("nlp")) {
       [currentText] = await this._tier2Nlp(currentText, _encode, boost, !!options.aggressive, confidenceThreshold);
     }
@@ -205,19 +316,28 @@ export class BaseScanner {
   ): Promise<any[]> {
     if (!text || typeof text !== 'string') return [];
 
-    const pipeline = options.pipeline || ["regex", "checksum", "nlp"];
+    const pipeline = options.pipeline || ["dlp", "regex", "checksum", "nlp"];
     const _encode = options.encodeFn || encode;
     const confidenceThreshold = options.confidenceThreshold ?? 0.7;
     const boost = this._resolveBoost(options.context);
     let allEntities: any[] = [];
     let remaining = text;
 
+    // --- Tier 0: DLP Heuristic ---
+    if (pipeline.includes("dlp")) {
+      const [newText, tier0] = await this._tier0Dlp(remaining, _encode, confidenceThreshold);
+      remaining = newText;
+      allEntities.push(...tier0);
+    }
+
+    // --- Tier 1: Deterministic ---
     if (pipeline.includes("regex") || pipeline.includes("checksum")) {
       const [newText, tier1] = await this._tier1Regex(remaining, _encode, boost, !!options.aggressive, confidenceThreshold);
       remaining = newText;
       allEntities.push(...tier1);
     }
 
+    // --- Tier 2: Probabilistic ---
     if (pipeline.includes("nlp")) {
       const [_newText, tier2] = await this._tier2Nlp(remaining, _encode, boost, !!options.aggressive, confidenceThreshold);
       allEntities.push(...tier2);
@@ -235,7 +355,7 @@ let scannerInstance: BaseScanner | null = null;
 
 export function getScanner(): BaseScanner {
   if (scannerInstance === null) {
-    const scannerType = process.env.MASK_SCANNER_TYPE?.toLowerCase() || 'local';
+    const scannerType = config.MASK_SCANNER_TYPE;
     
     if (scannerType === 'remote') {
       const { RemoteScanner } = require('./remote_scanner');

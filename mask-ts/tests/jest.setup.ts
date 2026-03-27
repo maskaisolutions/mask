@@ -15,6 +15,42 @@ jest.mock('@huggingface/transformers', () => ({
   })
 }), { virtual: true });
 
+// Mock LocalTransformersScanner to avoid starting worker processes and network hits in tests
+jest.mock('../src/core/transformers_scanner', () => {
+    const { BaseScanner } = jest.requireActual('../src/core/scanner');
+    return {
+        LocalTransformersScanner: class extends BaseScanner {
+            _warmupPromise = Promise.resolve();
+            constructor() { super(); }
+            async _tier2Nlp(
+                text: string, 
+                encodeFn: (val: string) => Promise<string>, 
+                _boostEntities: Set<string>, 
+                _aggressive: boolean, 
+                _confidenceThreshold: number
+            ): Promise<[string, any[]]> {
+                // Same logic as our HuggingFace mock above
+                const entities: any[] = [];
+                if (text.includes("John Doe")) {
+                    const start = text.indexOf("John Doe");
+                    entities.push({
+                        type: "PERSON",
+                        value: "John Doe",
+                        method: "nlp-local",
+                        confidence: 0.99,
+                        masked_value: await encodeFn("John Doe"),
+                        _start: start,
+                        _end: start + 8
+                    });
+                }
+                const maskedText = entities.length > 0 ? text.replace("John Doe", entities[0].masked_value) : text;
+                return [maskedText, entities];
+            }
+            async close(): Promise<void> { return Promise.resolve(); }
+        }
+    };
+});
+
 import * as crypto from 'crypto';
 import { getAuditLogger } from '../src/telemetry/audit_logger';
 

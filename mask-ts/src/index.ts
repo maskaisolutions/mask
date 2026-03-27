@@ -78,6 +78,15 @@ export async function ascanAndTokenize(
 
 export { MaskClient } from './client';
 
+// DLP sub-package (Multilingual detection, 50+ types)
+export {
+    LanguageContextResolver,
+    DLPPatternRegistry,
+    SensitiveCategory,
+    DLPValidationEngine,
+    DLPConfidenceScorer,
+} from './core/dlp';
+
 /**
  * Drop-in decorator for LangChain tools with automatic PII protection.
  */
@@ -89,3 +98,4 @@ export function secureTool(...args: any[]): any {
     const { secureTool: _secureTool } = require('./integrations/langchain_hooks');
     return _secureTool(...args);
 }
+
