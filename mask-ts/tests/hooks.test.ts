@@ -60,7 +60,7 @@ describe('TestHooks', () => {
         test('test_encodes_raw_email', async () => {
             const result = await deepEncodePII({"email": "test@example.com"});
             expect(looksLikeToken(result.email)).toBe(true);
-            expect(result.email).toMatch(/@email\.com$/);
+            expect(result.email).toMatch(/@example\.com$/);
         });
 
         test('test_does_not_double_encode_token', async () => {
@@ -91,7 +91,7 @@ describe('TestHooks', () => {
             const args = "Contact us at support@example.com for help.";
             const result = await deepEncodePII(args);
             expect(typeof result).toBe('string');
-            expect(result).toContain("@email.com");
+            expect(result).toContain("@example.com");
             expect(result).not.toContain("support@example.com");
         });
 

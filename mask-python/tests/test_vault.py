@@ -58,7 +58,7 @@ class TestMemoryVault:
 class TestEncodeDecodePublicAPI:
     def test_roundtrip_email(self):
         token = encode("user@example.com")
-        assert token.endswith("@email.com")
+        assert token.endswith("@example.com")
         assert decode(token) == "user@example.com"
 
     def test_roundtrip_opaque(self):

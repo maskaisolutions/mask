@@ -25,7 +25,7 @@ async def test_module_level_async_wrappers():
     """Test aencode and adecode from vault.py."""
     token = await aencode("test@async.com")
     assert looks_like_token(token)
-    assert token.endswith("@email.com")
+    assert token.endswith("@async.com")
 
     plaintext = await adecode(token)
     assert plaintext == "test@async.com"
@@ -54,4 +54,4 @@ async def test_client_async_wrappers():
         safe_text = await client.ascan_and_tokenize(text)
     assert "bob@example.com" not in safe_text
     assert "tkn-" in safe_text
-    assert safe_text.endswith("@email.com")
+    assert safe_text.endswith("@example.com")

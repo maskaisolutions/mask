@@ -71,7 +71,7 @@ class TestDeepEncodeEmails:
     def test_encodes_raw_email(self):
         result = _deep_encode_pii({"email": "test@example.com"})
         assert looks_like_token(result["email"])
-        assert result["email"].endswith("@email.com")
+        assert result["email"].endswith("@example.com")
 
     def test_does_not_double_encode_token(self):
         token = encode("original@test.com")
@@ -106,7 +106,7 @@ class TestEncryptAfterTool:
         args = "Contact us at support@example.com for help."
         result = _deep_encode_pii(args)
         assert isinstance(result, str)
-        assert "@email.com" in result
+        assert "@example.com" in result
         assert "support@example.com" not in result
 
     def test_encodes_leaked_emails_but_skips_tokens_in_nested_dict(self):

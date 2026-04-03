@@ -33,6 +33,7 @@ except ImportError:
 
 from mask_privacy.core.vault import encode
 from mask_privacy.core.fpe import generate_fpe_token, looks_like_token
+from mask_privacy.core.span import Span, resolve_overlaps, reconstruct
 
 # DLP Pipeline imports — multilingual detection + 50-type registry
 from mask_privacy.core.dlp.scorer import DLPConfidenceScorer
@@ -156,10 +157,8 @@ REGEX_PATTERNS: Dict[str, re.Pattern] = {
     "EMAIL_ADDRESS": re.compile(
         r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
     ),
-    "PHONE_NUMBER": re.compile(
-        r"\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}"
-        r"|\d{3}[\s\-.]?\d{4}"
-    ),
+    "PHONE_NUMBER": re.compile(r"(?<!\d)(?:\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}|\d{3}[\s\-.]?\d{4})(?!\d)"),
+    "PHONE_INTL": re.compile(r"(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)"),
     # International phone numbers (UK +44, France +33, Germany +49)
     "PHONE_NUMBER_INTL": re.compile(
         r"\+(?:44|33|49)[\s\-.]?\(?\d{1,5}\)?(?:[\s\-.]?\d{2,4}){2,4}"
@@ -202,6 +201,9 @@ class PresidioScanner:
 
     def __init__(self) -> None:
         logger.info("Initializing PresidioScanner. Workers will load models based on MASK_LANGUAGES.")
+        self.registry = DLPPatternRegistry()
+        self.lang_resolver = LanguageContextResolver()
+        self.validation_engine = DLPValidationEngine()
 
         self._supported_entities = [
             "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD",
@@ -214,44 +216,73 @@ class PresidioScanner:
         logger.info("Scanner entities updated: %s", self._supported_entities)
 
     # Tier 0 — DLP Heuristic Pipeline (multilingual, 50+ types)
-    def _tier0_dlp_heuristic(
+    def _tier0_collect_spans(
         self,
         text: str,
-        encode_fn,
         confidence_threshold: float,
-    ) -> tuple[str, List[Dict]]:
-        """Run the DLP pattern registry with language-aware scoring.
+    ) -> List[Span]:
+        """Run the DLP pattern registry using Category Mega-Regexes.
 
-        This tier executes *before* the legacy regex / NLP tiers and removes
-        validated matches from the text buffer to avoid double-detection.
+        Returns a flat list of ``Span`` objects.  No string mutation occurs
+        here — all encoding and text reconstruction happens in one final pass
+        after all tiers have collected their spans.
+
+        Uses pre-compiled per-category mega-regexes to scan the entire text
+        in O(text) per category instead of O(patterns × text).
         """
-        detected_language = _dlp_lang_resolver.resolve(text)
-        logger.debug("DLP language context: %s", detected_language)
+        locale = self.lang_resolver.resolve(text)
+        logger.debug("DLP language context: %s", locale)
 
-        raw_hits: list[tuple[int, int, str, str, float]] = []
+        spans: List[Span] = []
+        category_regexes = self.registry.get_category_regexes(locale=locale)
 
-        # Pass 1: Structured patterns from the registry
-        for type_tag, descriptor in _dlp_pattern_registry.iter_descriptors():
-            for m in descriptor.compiled_re.finditer(text):
+        # Pass 1: Category Mega-Regexes (O(text) per category bucket)
+        for cat_key, mega_re in category_regexes.items():
+            for m in mega_re.finditer(text):
+                type_tag = m.lastgroup
+                if type_tag is None:
+                    continue
                 matched_str = m.group(0)
                 if looks_like_token(matched_str):
                     continue
-                validator_result = _dlp_validation_engine.run(
+                descriptor = self.registry.descriptor_for(type_tag)
+                if descriptor is None:
+                    continue
+                
+                validator_result = self.validation_engine.run(
                     descriptor.validator_tag, matched_str
                 )
-                conf = _dlp_confidence_scorer.score(
-                    base_risk=descriptor.base_risk,
-                    match_start=m.start(),
-                    match_end=m.end(),
-                    full_text=text,
-                    proximity_terms=descriptor.proximity_terms,
-                    validator_passed=validator_result,
-                )
+                
+                # FUZZY FAIL-SAFE logic
+                if validator_result is False:
+                    if descriptor.is_high_entropy:
+                        conf = 0.85  # Higher than generic Phone (0.80)
+                    else:
+                        continue
+                else:
+                    conf = _dlp_confidence_scorer.score(
+                        base_risk=descriptor.base_risk,
+                        match_start=m.start(),
+                        match_end=m.end(),
+                        full_text=text,
+                        proximity_terms=descriptor.proximity_terms,
+                        validator_passed=validator_result,
+                    )
+                
                 if conf >= confidence_threshold:
-                    raw_hits.append((m.start(), m.end(), type_tag, matched_str, conf))
+                    spans.append(Span(
+                        start=m.start(),
+                        end=m.end(),
+                        entity_type=type_tag,
+                        original_value=matched_str,
+                        confidence=conf,
+                        method="dlp_heuristic",
+                        language=locale,
+                    ))
 
-        # Pass 2: Locale-tuned name patterns
-        for name_re in _dlp_pattern_registry.name_patterns_for(detected_language):
+        # Pass 2: Locale-tuned name patterns (JIT — only for detected language)
+        name_proximity = frozenset({"name", "contact", "person", "nom", "isim", "\u0627\u0633\u0645"})
+        for name_re in self.registry.name_patterns_for(locale):
             for m in name_re.finditer(text):
                 if looks_like_token(m.group(0)):
                     continue
@@ -260,46 +291,60 @@ class PresidioScanner:
                     match_start=m.start(),
                     match_end=m.end(),
                     full_text=text,
-                    proximity_terms=frozenset({"name", "contact", "person", "nom", "isim", "اسم"}),
+                    proximity_terms=name_proximity,
                     validator_passed=None,
                 )
                 if conf >= confidence_threshold:
-                    raw_hits.append((m.start(), m.end(), "PERSON_NAME", m.group(0), conf))
+                    spans.append(Span(
+                        start=m.start(),
+                        end=m.end(),
+                        entity_type="PERSON_NAME",
+                        original_value=m.group(0),
+                        confidence=conf,
+                        method="dlp_heuristic",
+                        language=locale,
+                    ))
 
-        # Pass 3: Locale-tuned address patterns
-        for addr_re in _dlp_pattern_registry.address_patterns_for(detected_language):
+        # Pass 3: Locale-tuned address patterns (JIT)
+        for addr_re in self.registry.address_patterns_for(locale):
             for m in addr_re.finditer(text):
                 if looks_like_token(m.group(0)):
                     continue
-                raw_hits.append((m.start(), m.end(), "PHYS_ADDRESS", m.group(0), 0.55))
+                spans.append(Span(
+                    start=m.start(),
+                    end=m.end(),
+                    entity_type="PHYS_ADDRESS",
+                    original_value=m.group(0),
+                    confidence=0.55,
+                    method="dlp_heuristic",
+                    language=locale,
+                ))
 
-        # De-duplicate overlapping spans — keep longer / higher-confidence match
-        raw_hits.sort(key=lambda h: (h[0], -(h[1] - h[0]), -h[4]))
-        deduped: list[tuple[int, int, str, str, float]] = []
-        occupied_end = -1
-        for start, end, tag, val, conf in raw_hits:
-            if start >= occupied_end:
-                deduped.append((start, end, tag, val, conf))
-                occupied_end = end
+        return spans
 
-        # Replace right-to-left to preserve offsets
+    # ── Legacy shim: preserves backward-compat for external callers ───────────
+    def _tier0_dlp_heuristic(
+        self,
+        text: str,
+        encode_fn,
+        confidence_threshold: float,
+    ) -> tuple[str, List[Dict]]:
+        """Backward-compat wrapper — collects spans then does a single-pass encode."""
+        spans = self._tier0_collect_spans(text, confidence_threshold)
+        resolved = resolve_overlaps(spans)
         entities: List[Dict] = []
-        excised = text
-        for start, end, tag, val, conf in reversed(deduped):
-            token = encode_fn(val)
-            excised = excised[:start] + token + excised[end:]
+        for span in resolved:
+            try:
+                span.masked_value = encode_fn(span.original_value, entity_type=span.entity_type)
+            except TypeError:
+                span.masked_value = encode_fn(span.original_value)
             entities.append({
-                "start": start,
-                "end": end,
-                "type": tag,
-                "value": val,
-                "method": "dlp_heuristic",
-                "confidence": conf,
-                "masked_value": token,
-                "language": detected_language,
+                "start": span.start, "end": span.end, "type": span.entity_type,
+                "value": span.original_value, "method": span.method,
+                "confidence": span.confidence, "masked_value": span.masked_value,
+                "language": span.language,
             })
-
-        return excised, entities
+        return reconstruct(text, resolved), entities
 
     # Tier 1 — Deterministic detection
     @staticmethod
@@ -322,6 +367,33 @@ class PresidioScanner:
         checksum = 3 * (d[0] + d[3] + d[6]) + 7 * (d[1] + d[4] + d[7]) + (d[2] + d[5] + d[8])
         return checksum % 10 == 0
 
+    def _tier1_collect_spans(
+        self,
+        text: str,
+        boost_entities: frozenset,
+        aggressive: bool,
+        confidence_threshold: float,
+    ) -> List[Span]:
+        """Run legacy Tier-1 regex patterns, return ``Span`` objects (no mutation)."""
+        spans: List[Span] = []
+        for entity_type, pattern in REGEX_PATTERNS.items():
+            for m in pattern.finditer(text):
+                val = m.group(0)
+                if looks_like_token(val):
+                    continue
+                confidence = 1.0 if (aggressive or entity_type.lower().replace("_", " ") in boost_entities) else 0.95
+                if entity_type == "CREDIT_CARD" and self._luhn_checksum(val):
+                    confidence = max(confidence, 0.99)
+                if entity_type == "US_ROUTING_NUMBER" and not self._aba_checksum(val):
+                    continue
+                if confidence >= confidence_threshold:
+                    spans.append(Span(
+                        start=m.start(), end=m.end(),
+                        entity_type=entity_type, original_value=val,
+                        confidence=confidence, method="regex",
+                    ))
+        return spans
+
     def _tier1_regex(
         self,
         text: str,
@@ -330,52 +402,21 @@ class PresidioScanner:
         aggressive: bool,
         confidence_threshold: float,
     ) -> tuple[str, List[Dict]]:
-        """Run Regex patterns + Luhn checksum, excise matches from text."""
+        """Backward-compat wrapper around ``_tier1_collect_spans``."""
+        spans = self._tier1_collect_spans(text, boost_entities, aggressive, confidence_threshold)
+        resolved = resolve_overlaps(spans)
         entities: List[Dict] = []
-        excised = text
-
-        # Sort matches by start position (descending) so replacements
-        # don't shift earlier offsets.
-        all_matches: list[tuple[int, int, str, str, float]] = []
-
-        for entity_type, pattern in REGEX_PATTERNS.items():
-            for m in pattern.finditer(text):
-                confidence = 0.95
-                if aggressive or entity_type.lower().replace("_", " ") in boost_entities:
-                    confidence = 1.0
-                # Boost credit cards that pass Luhn
-                if entity_type == "CREDIT_CARD" and self._luhn_checksum(m.group(0)):
-                    confidence = max(confidence, 0.99)
-                # Validate ABA routing numbers via checksum — drop non-matching
-                if entity_type == "US_ROUTING_NUMBER" and not self._aba_checksum(m.group(0)):
-                    continue
-                all_matches.append((m.start(), m.end(), entity_type, m.group(0), confidence))
-
-        # Deduplicate overlapping spans — keep the longest match
-        all_matches.sort(key=lambda x: (x[0], -(x[1] - x[0])))
-        filtered: list[tuple[int, int, str, str, float]] = []
-        last_end = -1
-        for start, end, etype, val, conf in all_matches:
-            if start >= last_end:
-                filtered.append((start, end, etype, val, conf))
-                last_end = end
-
-        # Replace from right to left to preserve offsets
-        for start, end, etype, val, conf in reversed(filtered):
-            if conf >= confidence_threshold and not looks_like_token(val):
-                token = encode_fn(val)
-                excised = excised[:start] + token + excised[end:]
-                entities.append({
-                    "start": start,
-                    "end": end,
-                    "type": etype,
-                    "value": val,
-                    "method": "regex",
-                    "confidence": conf,
-                    "masked_value": token,
-                })
-
-        return excised, entities
+        for span in resolved:
+            try:
+                span.masked_value = encode_fn(span.original_value, entity_type=span.entity_type)
+            except TypeError:
+                span.masked_value = encode_fn(span.original_value)
+            entities.append({
+                "start": span.start, "end": span.end, "type": span.entity_type,
+                "value": span.original_value, "method": span.method,
+                "confidence": span.confidence, "masked_value": span.masked_value,
+            })
+        return reconstruct(text, resolved), entities
 
     # Tier 2 — Probabilistic NLP detection
 
@@ -424,7 +465,10 @@ class PresidioScanner:
 
             val = text[r.start:r.end]
             if confidence >= confidence_threshold and not looks_like_token(val):
-                token = encode_fn(val)
+                try:
+                    token = encode_fn(val, entity_type=r.entity_type)
+                except TypeError:
+                    token = encode_fn(val)
                 masked_text = masked_text[:r.start] + token + masked_text[r.end:]
                 entities.append({
                     "type": r.entity_type,
@@ -474,15 +518,27 @@ class PresidioScanner:
         _encode = encode_fn or encode
         boost = self._resolve_boost(context)
 
-        # --- Tier 0: DLP Heuristic (multilingual, 50+ types) ---
+        # ── Span-accumulation phase (no string mutation) ──────────────────
+        all_spans: List[Span] = []
+
         if "dlp" in pipeline:
-            text, _ = self._tier0_dlp_heuristic(text, _encode, confidence_threshold)
+            all_spans.extend(self._tier0_collect_spans(text, confidence_threshold))
 
-        # --- Tier 1: Deterministic ---
         if "regex" in pipeline or "checksum" in pipeline:
-            text, _ = self._tier1_regex(text, _encode, boost, aggressive, confidence_threshold)
+            all_spans.extend(self._tier1_collect_spans(text, boost, aggressive, confidence_threshold))
 
-        # --- Tier 2: Probabilistic (on the *remaining* text) ---
+        # ── Resolve overlaps across ALL deterministic tiers in one pass ───
+        resolved = resolve_overlaps(all_spans)
+        for span in resolved:
+            try:
+                span.masked_value = _encode(span.original_value, entity_type=span.entity_type)
+            except TypeError:
+                span.masked_value = _encode(span.original_value)
+
+        # Apply deterministic masks in a single string reconstruction
+        text = reconstruct(text, resolved)
+
+        # ── Tier 2: Probabilistic NLP (runs on already-masked text) ──────
         if "nlp" in pipeline:
             text, _ = self._tier2_nlp(text, _encode, boost, aggressive, confidence_threshold)
 
@@ -506,15 +562,29 @@ class PresidioScanner:
         boost = self._resolve_boost(context)
         all_entities: List[Dict] = []
 
-        remaining = text
+        # ── Span-accumulation phase ───────────────────────────────────────
+        all_spans: List[Span] = []
 
         if "dlp" in pipeline:
-            remaining, tier0 = self._tier0_dlp_heuristic(remaining, _encode, confidence_threshold)
-            all_entities.extend(tier0)
+            all_spans.extend(self._tier0_collect_spans(text, confidence_threshold))
 
         if "regex" in pipeline or "checksum" in pipeline:
-            remaining, tier1 = self._tier1_regex(remaining, _encode, boost, aggressive, confidence_threshold)
-            all_entities.extend(tier1)
+            all_spans.extend(self._tier1_collect_spans(text, boost, aggressive, confidence_threshold))
+
+        resolved = resolve_overlaps(all_spans)
+        for span in resolved:
+            try:
+                span.masked_value = _encode(span.original_value, entity_type=span.entity_type)
+            except TypeError:
+                span.masked_value = _encode(span.original_value)
+            all_entities.append({
+                "start": span.start, "end": span.end, "type": span.entity_type,
+                "value": span.original_value, "method": span.method,
+                "confidence": span.confidence, "masked_value": span.masked_value,
+                "language": span.language,
+            })
+
+        remaining = reconstruct(text, resolved)
 
         if "nlp" in pipeline:
             _, tier2 = self._tier2_nlp(remaining, _encode, boost, aggressive, confidence_threshold)
@@ -555,8 +625,11 @@ class PresidioScanner:
             # DLP tier uses sync encode via identity pass then async encode
             _, dlp_entities = self._tier0_dlp_heuristic(text, lambda x: x, confidence_threshold)
             if dlp_entities:
-                vals = [e["value"] for e in dlp_entities]
-                tokens = await asyncio.gather(*[_encode(v) for v in vals])
+                vals = [(e["value"], e.get("type", "UNKNOWN")) for e in dlp_entities]
+                async def _enc(v, t):
+                    try: return await _encode(v, entity_type=t)
+                    except TypeError: return await _encode(v)
+                tokens = await asyncio.gather(*[_enc(v, t) for v, t in vals])
                 dlp_entities.sort(key=lambda x: x.get("start", 0), reverse=True)
                 for i, e in enumerate(reversed(dlp_entities)):
                     idx = len(dlp_entities) - 1 - i
@@ -566,8 +639,11 @@ class PresidioScanner:
         if "regex" in pipeline or "checksum" in pipeline:
             _, entities = self._tier1_regex(text, lambda x: x, boost, aggressive, confidence_threshold)
             if entities:
-                vals = [e["value"] for e in entities]
-                tokens = await asyncio.gather(*[_encode(v) for v in vals])
+                vals = [(e["value"], e.get("type", "UNKNOWN")) for e in entities]
+                async def _enc(v, t):
+                    try: return await _encode(v, entity_type=t)
+                    except TypeError: return await _encode(v)
+                tokens = await asyncio.gather(*[_enc(v, t) for v, t in vals])
                 entities.sort(key=lambda x: x.get("start", 0), reverse=True)
                 for i, e in enumerate(reversed(entities)):
                     idx = len(entities) - 1 - i
@@ -607,8 +683,11 @@ class PresidioScanner:
         if "dlp" in pipeline:
             _, tier0 = self._tier0_dlp_heuristic(remaining, lambda x: x, confidence_threshold)
             if tier0:
-                vals = [e["value"] for e in tier0]
-                tokens = await asyncio.gather(*[_encode(v) for v in vals])
+                vals = [(e["value"], e.get("type", "UNKNOWN")) for e in tier0]
+                async def _enc(v, t):
+                    try: return await _encode(v, entity_type=t)
+                    except TypeError: return await _encode(v)
+                tokens = await asyncio.gather(*[_enc(v, t) for v, t in vals])
                 for i, t in enumerate(tokens):
                     tier0[i]["masked_value"] = t
                 all_entities.extend(tier0)
@@ -619,8 +698,11 @@ class PresidioScanner:
         if "regex" in pipeline or "checksum" in pipeline:
             _, tier1 = self._tier1_regex(remaining, lambda x: x, boost, aggressive, confidence_threshold)
             if tier1:
-                vals = [e["value"] for e in tier1]
-                tokens = await asyncio.gather(*[_encode(v) for v in vals])
+                vals = [(e["value"], e.get("type", "UNKNOWN")) for e in tier1]
+                async def _enc(v, t):
+                    try: return await _encode(v, entity_type=t)
+                    except TypeError: return await _encode(v)
+                tokens = await asyncio.gather(*[_enc(v, t) for v, t in vals])
                 for i, t in enumerate(tokens):
                     tier1[i]["masked_value"] = t
                 all_entities.extend(tier1)
@@ -679,7 +761,10 @@ class PresidioScanner:
                 valid_results.append((r, confidence))
 
         # Parallel encode
-        tokens = await asyncio.gather(*[encode_fn(v) for v in to_encode])
+        async def _enc(v, t):
+            try: return await encode_fn(v, entity_type=t)
+            except TypeError: return await encode_fn(v)
+        tokens = await asyncio.gather(*[_enc(v, r.entity_type) for v, (r, _) in zip(to_encode, valid_results)])
 
         # Replacement phase (right to left)
         for i, (r, confidence) in enumerate(valid_results):

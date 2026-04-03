@@ -96,7 +96,7 @@ export class LocalTransformersScanner extends BaseScanner {
 
   protected async _tier2Nlp(
     text: string,
-    encodeFn: (val: string) => Promise<string>,
+    encodeFn: (val: string, options?: any) => Promise<string>,
     boostEntities: Set<string>,
     aggressive: boolean,
     confidenceThreshold: number,
@@ -136,7 +136,7 @@ export class LocalTransformersScanner extends BaseScanner {
         }
         
         if (confidence >= confidenceThreshold && !looksLikeToken(val) && val.length > 1) {
-          const token = await encodeFn(val);
+          const token = await encodeFn(val, { entityType: entityType });
           entities.push({
             type: entityType,
             value: val,

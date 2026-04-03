@@ -538,6 +538,7 @@ export type EncodeOptions = {
     ttl?: number;
     searchBuckets?: ('year' | 'month' | 'day' | 'numeric')[];
     searchBucketSize?: number;
+    entityType?: string;
 };
 
 /**
@@ -565,7 +566,7 @@ export async function encode(rawText: string, options: EncodeOptions = {}): Prom
   }
 
   // 2. Generate new token
-  const token = await generateFPEToken(text);
+  const token = await generateFPEToken(text, options.entityType || 'UNKNOWN');
 
   // 3. Encrypt the plaintext before it touches the vault
   const ciphertext = cryptoEngine.encrypt(text);

@@ -23,7 +23,7 @@ Multilingual support is handled uniquely at each tier of the detection pipeline 
 ### Tier 0: DLP Heuristic (Fastest)
 The DLP engine uses locale-aware regex patterns and checksum validators.
 - **Names & Addresses:** Uses script-aware patterns (e.g., matching Japanese Kanji vs. Arabic script).
-- **Global IDs:** Supports 50+ international ID formats (Spanish DNI, French INSEE, etc.) with functional checksum validation.
+- **Global IDs:** Supports 28 core international ID formats (Spanish DNI, French INSEE, etc.) with functional checksum validation.
 - **Latency:** < 5ms.
 
 ### Tier 1: Deterministic (Global Standards)

@@ -50,7 +50,7 @@ def test_deep_decode_handles_paragraphs():
 
 def test_detokenize_text_lenient():
     """Test that unknown tokens are left as-is."""
-    bogus = "tkn-12345678@email.com"
+    bogus = "tkn-12345678@example.com"
     paragraph = f"Hello {bogus}"
     
     restored = detokenize_text(paragraph)

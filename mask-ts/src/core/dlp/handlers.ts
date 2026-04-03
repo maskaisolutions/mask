@@ -186,6 +186,111 @@ export function checkSaudiNid(raw: string): boolean {
   return total % 10 === 0;
 }
 
+// ── French INSEE (Mod-97) ──────────────────────────────────────────────────
+
+export function checkFrInsee(raw: string): boolean {
+  let cleaned = raw.replace(/ /g, "").toUpperCase();
+  if (cleaned.length !== 15) return false;
+  
+  // Handle Corsica
+  cleaned = cleaned.replace(/2A/g, "19").replace(/2B/g, "18");
+  if (!/^\d+$/.test(cleaned)) return false;
+  
+  const baseNumberStr = cleaned.slice(0, 13);
+  const expectedKey = parseInt(cleaned.slice(13), 10);
+  
+  // Modulo 97 on a 13-digit string requires BigInt
+  const baseNumber = BigInt(baseNumberStr);
+  const calculatedKey = 97n - (baseNumber % 97n);
+  
+  return Number(calculatedKey) === expectedKey;
+}
+
+// ── Canadian SIN (Luhn-9) ──────────────────────────────────────────────────
+
+export function checkCaSin(raw: string): boolean {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length !== 9) return false;
+  
+  let total = 0;
+  for (let idx = 0; idx < digits.length; idx++) {
+    let val = parseInt(digits[idx], 10);
+    if (idx % 2 === 1) { // 1st is 0, 2nd is 1...
+      val *= 2;
+      if (val > 9) val -= 9;
+    }
+    total += val;
+  }
+  return total % 10 === 0;
+}
+
+// ── UK National Insurance Number (NINO) ────────────────────────────────────
+
+const UK_NINO_REGEX = /^(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-PR-TW-Z]{2}[0-9]{6}[A-D]$/;
+
+export function checkUkNino(raw: string): boolean {
+  const cleaned = raw.replace(/ /g, "").toUpperCase();
+  if (cleaned.length !== 9) return false;
+  return UK_NINO_REGEX.test(cleaned);
+}
+
+// ── Chinese ID (18-digit, ISO 7064:1983.MOD 11-2) ───────────────────────────
+
+export function checkCnId(raw: string): boolean {
+  const cleaned = raw.replace(/[^0-9X]/gi, "").toUpperCase();
+  if (cleaned.length !== 18) return false;
+
+  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+  const checkDigits = "10X98765432";
+
+  let total = 0;
+  for (let i = 0; i < 17; i++) {
+    total += parseInt(cleaned[i], 10) * weights[i];
+  }
+  return cleaned[17] === checkDigits[total % 11];
+}
+
+// ── Japanese Individual Number (12-digit, Modulo 11) ────────────────────────
+
+export function checkJaId(raw: string): boolean {
+  const digitsStr = raw.replace(/\D/g, "");
+  if (digitsStr.length !== 12) return false;
+  const d = digitsStr.split("").map(Number);
+
+  const weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
+  let total = 0;
+  for (let i = 0; i < 11; i++) {
+    total += d[i] * weights[i];
+  }
+  const remainder = total % 11;
+  const expected = remainder <= 1 ? 0 : 11 - remainder;
+  return d[11] === expected;
+}
+
+// ── Spanish DNI/NIE (8 digits + 1 letter) ───────────────────────────────────
+
+export function checkEsId(raw: string): boolean {
+  const cleaned = raw.replace(/[\s-]/g, "").toUpperCase();
+  if (cleaned.length !== 9) return false;
+
+  const mapping: Record<string, string> = { X: "0", Y: "1", Z: "2" };
+  const firstChar = cleaned[0];
+  let numStr: string;
+
+  if (firstChar in mapping) {
+    numStr = mapping[firstChar] + cleaned.slice(1, 8);
+  } else if (/^\d$/.test(firstChar)) {
+    numStr = cleaned.slice(0, 8);
+  } else {
+    return false;
+  }
+
+  if (!/^\d+$/.test(numStr)) return false;
+  const num = parseInt(numStr, 10);
+  const validLetters = "TRWAGMYFPDXBNJZSQVHLCKE";
+  return cleaned[8] === validLetters[num % 23];
+}
+
 // ── Dispatcher ─────────────────────────────────────────────────────────────
 
 type ValidatorFn = (raw: string) => boolean;
@@ -200,6 +305,12 @@ const VALIDATOR_DISPATCH: Record<string, ValidatorFn> = {
   ipv4: checkIpv4Octets,
   tcid: checkTcidNumber,
   saudi_nid: checkSaudiNid,
+  fr_insee: checkFrInsee,
+  ca_sin: checkCaSin,
+  uk_nino: checkUkNino,
+  cn_id: checkCnId,
+  ja_id: checkJaId,
+  es_id: checkEsId,
 };
 
 /**

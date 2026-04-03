@@ -20,7 +20,7 @@ def _stable_key(monkeypatch):
 class TestFPETokenGeneration:
     def test_email_format(self):
         token = generate_fpe_token("user@company.io")
-        assert token.endswith("@email.com")
+        assert token.endswith("@company.io")
         assert token.startswith("tkn-")
         # Must pass a standard email regex
         assert re.match(r"^[^@]+@[^@]+\.[^@]+$", token)
@@ -67,7 +67,7 @@ class TestFPETokenGeneration:
         t1 = generate_fpe_token("a@b.com")
         t2 = generate_fpe_token("a@b.com")
         assert t1 == t2
-        assert t1.endswith("@email.com")
+        assert t1.endswith("@b.com")
 
     def test_different_inputs_different_tokens(self):
         """Different inputs must produce different tokens."""
@@ -94,7 +94,7 @@ class TestFPETokenGeneration:
 
 class TestLooksLikeToken:
     def test_email_token(self):
-        assert looks_like_token("tkn-abcd1234@email.com") is True
+        assert looks_like_token("tkn-abcd1234abcd@email.com") is True
 
     def test_phone_token(self):
         assert looks_like_token("+1-555-1234567") is True

@@ -10,7 +10,6 @@ import * as crypto from 'crypto';
 import { config } from '../config';
 import { getKeyProvider } from './key_provider';
 import { MaskSecurityError } from './exceptions';
-import { looksLikeToken } from './fpe_utils';
 
 // Master key management
 
@@ -52,7 +51,8 @@ export function resetMasterKey(): void {
 // Detectors — order matters: first match wins
 
 const _EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const _PHONE_RE = /^\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}$|^\d{3}[\s\-.]?\d{4}$/;
+const _PHONE_RE = /(?<!\d)(?:\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}|\d{3}[\s\-.]?\d{4})(?!\d)/;
+const _PHONE_INTL_RE = /(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)/;
 const _SSN_RE = /^\d{3}-\d{2}-\d{4}$/;
 const _CC_RE = /^(?:\d{4}[ \-]?){3}\d{4}$/;
 const _ROUTING_RE = /^\d{9}$/;
@@ -60,6 +60,9 @@ const _TCID_RE = /^[1-9]\d{9}[02468]$/;
 const _SAUDI_NID_RE = /^1\d{9}$/;
 const _UAE_EID_RE = /^784-\d{4}-\d{7}-\d$/;
 const _IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{4,30}$/;
+const _CN_ID_RE = /^[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]$/;
+const _JA_ID_RE = /^\d{12}$/;
+const _ES_ID_RE = /^(?:\d{8}[A-Z]|[XYZ]\d{7}[A-Z])$/;
 
 // Deterministic helpers (HMAC-based)
 
@@ -96,54 +99,162 @@ async function _hmacDigits(plaintext: string, n: number, offset: number = 0): Pr
 
 // Public API
 
+// Dictionary for Semantic NLP Faker Generation
+const _FIRST_NAMES = ["Taylor", "Jordan", "Casey", "Morgan", "Riley", "Avery", "Rowan", "Quinn", "Charlie", "Peyton", "Blake", "Dakota", "Reese", "Skyler", "Finley", "Eden", "Harley", "Rory", "Emerson", "Remi"];
+const _LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"];
+const _CITIES = ["London", "Paris", "Berlin", "Tokyo", "Rome", "Madrid", "Vienna", "Sydney", "Toronto", "Chicago", "Seattle", "Austin", "Boston", "Denver", "Dallas", "Miami", "Seoul", "Dubai", "Mumbai", "Cairo"];
+
+/** Return a deterministic item from an array. */
+async function _pickFromArray(plaintext: string, array: string[]): Promise<string> {
+   const digits = await _hmacDigits(plaintext, 8);
+   const num = parseInt(digits, 10);
+   return array[num % array.length];
+}
+
+/** Compute Luhn check digit */
+function _computeLuhnDigit(partialNum: string): string {
+    const digits = partialNum.split("").map(Number);
+    let sum = 0;
+    let shouldDouble = true; 
+    for (let i = digits.length - 1; i >= 0; i--) {
+        let digit = digits[i];
+        if (shouldDouble) {
+            digit *= 2;
+            if (digit > 9) digit -= 9;
+        }
+        sum += digit;
+        shouldDouble = !shouldDouble;
+    }
+    return ((10 - (sum % 10)) % 10).toString();
+}
+
+function _computeCnIdCheck(partial: string): string {
+  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+  const checkDigits = "10X98765432";
+  let total = 0;
+  for (let i = 0; i < 17; i++) {
+    total += parseInt(partial[i], 10) * weights[i];
+  }
+  return checkDigits[total % 11];
+}
+
+function _computeJaIdCheck(partial: string): number {
+  const weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
+  let total = 0;
+  for (let i = 0; i < 11; i++) {
+    total += parseInt(partial[i], 10) * weights[i];
+  }
+  const remainder = total % 11;
+  return remainder <= 1 ? 0 : 11 - remainder;
+}
+
+function _computeEsIdCheck(num: number): string {
+  return "TRWAGMYFPDXBNJZSQVHLCKE"[num % 23];
+}
+
+// Public API
+
 /**
- * Return a **deterministic**, format-preserving token for rawText.
+ * Return a **deterministic**, format-preserving token for rawText using its entityType.
  */
-export async function generateFPEToken(rawText: string): Promise<string> {
+export async function generateFPEToken(rawText: string, entityType: string = 'UNKNOWN'): Promise<string> {
   const text = rawText.trim();
+  let type = (entityType || "UNKNOWN").toUpperCase();
 
-  if (_EMAIL_RE.test(text)) {
-    return `tkn-${await _hmacHex(text)}@email.com`;
+  if (type === "UNKNOWN") {
+    if (_EMAIL_RE.test(text)) type = "EMAIL_ADDRESS";
+    else if (_SSN_RE.test(text)) type = "US_SSN";
+    else if (_CC_RE.test(text)) type = "CREDIT_CARD";
+    else if (_ROUTING_RE.test(text)) type = "US_ROUTING_NUMBER";
+    else if (_TCID_RE.test(text)) type = "TR_TCID";
+    else if (_SAUDI_NID_RE.test(text)) type = "SA_NATIONAL_ID";
+    else if (_UAE_EID_RE.test(text)) type = "UAE_EMIRATES_ID";
+    else if (_CN_ID_RE.test(text)) type = "CN_ID";
+    else if (_JA_ID_RE.test(text)) type = "JA_ID";
+    else if (_ES_ID_RE.test(text)) type = "ES_DNI";
+    else if (_IBAN_RE.test(text)) type = "INTL_BANK_IBAN";
+    else if (_PHONE_RE.test(text)) type = "PHONE_NUMBER";
   }
 
-  if (_PHONE_RE.test(text)) {
-    return `+1-555-${await _hmacDigits(text, 7)}`;
+  if (type === "EMAIL_ADDRESS" || type === "EMAIL_ADDR") {
+    const parts = text.split("@");
+    const domain = parts.length === 2 ? parts[1] : "email.com";
+    return `tkn-${await _hmacHex(text)}@${domain}`;
   }
 
-  if (_SSN_RE.test(text)) {
+  if (type === "PHONE_NUMBER" || type === "PHONE_NUM" || type === "PHONE_NUM_INTL") {
+    const m = text.match(/^\+([1-9]\d{0,3})/);
+    const cc = m ? m[1] : "1";
+    return `+${cc}-555-${await _hmacDigits(text, 7)}`;
+  }
+
+  if (type === "US_SSN") {
     return `000-00-${await _hmacDigits(text, 4)}`;
   }
 
-  if (_CC_RE.test(text)) {
-    return `4000-0000-0000-${await _hmacDigits(text, 4)}`;
+  if (type === "CREDIT_CARD" || type === "CREDIT_CARD_NUMBER") {
+    const base = `400000000000${await _hmacDigits(text, 3)}`;
+    const checkDig = _computeLuhnDigit(base);
+    const full = base + checkDig; 
+    return `${full.slice(0,4)}-${full.slice(4,8)}-${full.slice(8,12)}-${full.slice(12,16)}`;
   }
 
-  if (_ROUTING_RE.test(text)) {
+  if (type === "US_ROUTING_NUMBER" || type === "US_ABA_ROUTING") {
     return `000000${await _hmacDigits(text, 3)}`;
   }
 
-  // Turkish TC Kimlik No (format: 990000 + XXXX + even digit)
-  if (_TCID_RE.test(text)) {
-    const tail = await _hmacDigits(text, 5);
-    let lastD = parseInt(tail[tail.length - 1], 10);
-    if (lastD % 2 !== 0) lastD = (lastD + 1) % 10;
-    return `990000${tail.slice(0, 4)}${lastD}`;
+  if (type === "TR_TCID") {
+    const core = await _hmacDigits(text, 4);
+    const partial = `990000${core}`;
+    let sum1_10 = 0;
+    for (let i = 0; i < partial.length; i++) sum1_10 += parseInt(partial[i], 10);
+    const d11Raw = sum1_10 % 10;
+    const d11 = d11Raw % 2 === 0 ? d11Raw : (d11Raw + 1) % 10;
+    return `${partial}${d11}`;
   }
 
-  // Saudi National ID (format: 100000XXXX)
-  if (_SAUDI_NID_RE.test(text)) {
+  if (type === "SA_NATIONAL_ID") {
     return `100000${await _hmacDigits(text, 4)}`;
   }
 
-  // UAE Emirates ID (format: 784-0000-XXXXXXX-X)
-  if (_UAE_EID_RE.test(text)) {
-    return `784-0000-${await _hmacDigits(text, 7)}-${await _hmacDigits(text, 1, 20)}`;
+  if (type === "UAE_EMIRATES_ID") {
+    const base = `7840000${await _hmacDigits(text, 7)}`;
+    const checkDig = _computeLuhnDigit(base);
+    return `784-0000-${base.slice(7, 14)}-${checkDig}`;
   }
 
-  // IBAN (format: XX00-XXXX... — preserve country code, zero check digits)
-  if (_IBAN_RE.test(text)) {
-    const countryCode = text.slice(0, 2);
+  if (type === "INTL_BANK_IBAN" || type === "IBAN_CODE") {
+    const countryCode = (text.length >= 2 && /[a-zA-Z]{2}/.test(text.slice(0, 2))) ? text.slice(0, 2).toUpperCase() : "US";
     return `${countryCode}00${(await _hmacHex(text, 8)).toUpperCase()}`;
+  }
+
+  if (type === "CN_ID") {
+    const base = `88000019900101${await _hmacDigits(text, 3)}`;
+    return base + _computeCnIdCheck(base);
+  }
+
+  if (type === "JA_ID") {
+    const base = `000000${await _hmacDigits(text, 5)}`;
+    return base + _computeJaIdCheck(base).toString();
+  }
+
+  if (type === "ES_DNI") {
+    const digits = `000${await _hmacDigits(text, 5)}`;
+    return digits + _computeEsIdCheck(parseInt(digits, 10));
+  }
+
+  if (type === "PERSON" || type === "PERSON_NAME") {
+      const f = await _pickFromArray(text, _FIRST_NAMES);
+      const l = await _pickFromArray(text + "last", _LAST_NAMES);
+      return `<PER:${f}_${l}>`;
+  }
+  if (type === "LOCATION" || type === "PHYS_ADDRESS") {
+      const c = await _pickFromArray(text, _CITIES);
+      return `<LOC:${c}>`;
+  }
+  if (type === "ORGANIZATION") {
+      const c = await _pickFromArray(text, _LAST_NAMES);
+      return `<ORG:${c}_Inc>`;
   }
 
   return `[TKN-${await _hmacHex(text)}]`;

@@ -46,7 +46,7 @@ class TestLangchainMaskToolWrapper:
         result = secure(email=token, subject="Welcome")
 
         assert result["target"] != "user@example.com"
-        assert result["target"].endswith("@email.com")
+        assert result["target"].endswith("@example.com")
 
 
 class TestLangchainMaskCallbackHandler:
@@ -94,7 +94,7 @@ class TestLangchainSecureTool:
 
         result = send_email(email=token, body="Hello")
         assert "dev@mask.ai" not in result
-        assert "@email.com" in result
+        assert "@mask.ai" in result
 
     def test_secure_tool_preserves_non_pii(self):
         @secure_tool

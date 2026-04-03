@@ -67,7 +67,7 @@ Mask implements a **3-tier Waterfall Detection Pipeline** that maximises speed a
 
 | Tier | Method | Speed | Description |
 |------|--------|-------|-------------|
-| **0 — DLP Heuristic** | Regex + Checksum + Proximity Scoring | ⚡ Fastest | 50+ structured patterns with hard-validation (Luhn, IBAN Mod-97, Turkish TCID, Saudi NID) and proximity-weighted confidence boosting. |
+| **0 — DLP Heuristic** | Regex + Checksum + Proximity Scoring | ⚡ Fastest | 28 structured patterns with hard-validation (Luhn, IBAN Mod-97, Turkish TCID, Saudi NID) and proximity-weighted confidence boosting. |
 | **1 — Deterministic Regex** | Format-specific regex | ⚡ Fast | Legacy email, phone, SSN, CC patterns with ABA/Luhn checksums. |
 | **2 — Probabilistic NLP** | Transformer models (spaCy / HuggingFace) | 🐢 Slow | Catches unstructured entities (names, organisations) that regex cannot identify. |
 
@@ -116,7 +116,7 @@ confidence = baseRisk + Σ(keywordBoost / (1 + ln(1 + distance)))
 
 Where `distance` is the character offset between match and each context keyword. This ensures that an ambiguous pattern (e.g., a 9-digit number) only triggers as sensitive data when relevant keywords like "routing" or "bank" appear nearby.
 
-### 50+ Supported Data Types
+### 28 Core Supported Data Types
 
 | Category | Types |
 |----------|-------|

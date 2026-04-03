@@ -21,7 +21,7 @@ describe('TestAsyncWrappers', () => {
     test('test_module_level_async_wrappers', async () => {
         const token = await aencode("test@async.com");
         expect(looksLikeToken(token)).toBe(true);
-        expect(token).toMatch(/@email\.com$/);
+        expect(token).toMatch(/@async\.com$/);
 
         const plaintext = await adecode(token);
         expect(plaintext).toBe("test@async.com");
@@ -43,6 +43,6 @@ describe('TestAsyncWrappers', () => {
         const safeText = await client.ascanAndTokenize(text);
         expect(safeText).not.toContain("bob@example.com");
         expect(safeText).toContain("tkn-");
-        expect(safeText).toMatch(/@email\.com$/);
+        expect(safeText).toMatch(/@example\.com$/);
     });
 });

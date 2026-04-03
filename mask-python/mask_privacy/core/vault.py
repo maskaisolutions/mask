@@ -462,7 +462,7 @@ def reset_vault() -> None:
 
 # Public API
 
-def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10) -> str:
+def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10, entity_type: str = "UNKNOWN") -> str:
     if looks_like_token(text):
         return text
 
@@ -478,7 +478,7 @@ def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[s
         return existing
 
     # 2. Generate new token
-    token = generate_fpe_token(text)
+    token = generate_fpe_token(text, entity_type=entity_type)
     ciphertext = crypto.encrypt(text)
     effective_ttl = ttl or DEFAULT_TTL
 
@@ -557,7 +557,7 @@ async def adecode(token: str) -> str:
         logger.error("Failed to decrypt token %s: %s", token, e)
         raise DecodeError(f"Decryption failed for token {token}: {e}")
 
-async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10) -> str:
+async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10, entity_type: str = "UNKNOWN") -> str:
     """Native async encode — uses AsyncRedisVault when vault type is 'redis', otherwise falls back to to_thread."""
     if looks_like_token(text):
         return text
@@ -566,7 +566,7 @@ async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional
     if not async_vault:
         import asyncio
         from functools import partial
-        return await asyncio.to_thread(partial(encode, text, ttl=ttl, search_buckets=search_buckets, search_bucket_size=search_bucket_size))
+        return await asyncio.to_thread(partial(encode, text, ttl=ttl, search_buckets=search_buckets, search_bucket_size=search_bucket_size, entity_type=entity_type))
 
     crypto = get_crypto_engine()
     index_secret = crypto.get_index_secret()
@@ -577,7 +577,7 @@ async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional
         get_audit_logger().log("dedup", existing)
         return existing
 
-    token = generate_fpe_token(text)
+    token = generate_fpe_token(text, entity_type=entity_type)
     ciphertext = crypto.encrypt(text)
     effective_ttl = ttl or DEFAULT_TTL
 

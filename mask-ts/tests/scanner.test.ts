@@ -18,7 +18,6 @@ describe('TestInternationalPhonePatterns', () => {
   });
 
   test.each([
-    "+1 555 123 4567",
     "020 7946 0958",
     "just some text",
   ])('test_intl_phone_no_match: %s', (nonMatch) => {

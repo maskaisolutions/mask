@@ -44,26 +44,28 @@ class PatternDescriptor(NamedTuple):
     base_risk: float
     category: SensitiveCategory
     validator_tag: Optional[str]      # e.g. "luhn", "tcid", "iban", "saudi_nid"
+    is_high_entropy: bool             # Should we always run this even in other locales?
+    supported_locales: List[str]      # Which locales is this specific to? ["*"] for global.
 
 
 # ── Locale-specific auxiliary patterns ────────────────────────────────────────
 
 LOCALE_NAME_RULES: Dict[str, List[re.Pattern]] = {
     "en": [
-        re.compile(r"\b[A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b"),
-        re.compile(r"\b(?:Mr|Mrs|Ms|Dr|Prof)\.?\s+[A-Z][a-z]+\b"),
+        re.compile(r"\b[A-Z][a-z\-\']+ [A-Z][a-z\-\']+(?:\s+[A-Z][a-z\-\']+)?\b"),
+        re.compile(r"\b(?:Mr|Mrs|Ms|Dr|Prof)\.?\s+[A-Z][a-z\-\']+\b"),
     ],
     "es": [
-        re.compile(r"\b[A-Z][a-záéíóúñ]+ [A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ]+)?\b"),
-        re.compile(r"\b(?:Sr|Sra|Srta)\.?\s+[A-Z][a-záéíóúñ]+\b"),
+        re.compile(r"\b[A-Z][a-záéíóúñ\-\']+ [A-Z][a-záéíóúñ\-\']+(?:\s+[A-Z][a-záéíóúñ\-\']+)?\b"),
+        re.compile(r"\b(?:Sr|Sra|Srta)\.?\s+[A-Z][a-záéíóúñ\-\']+\b"),
     ],
     "fr": [
-        re.compile(r"\b[A-Z][a-zàâçéèêëïîôùûü]+ [A-Z][a-zàâçéèêëïîôùûü]+\b"),
-        re.compile(r"\b(?:M|Mme|Mlle)\.?\s+[A-Z][a-zàâçéèêëïîôùûü]+\b"),
+        re.compile(r"\b[A-Z][a-zàâçéèêëïîôùûü\-\']+ [A-Z][a-zàâçéèêëïîôùûü\-\']+\b"),
+        re.compile(r"\b(?:M|Mme|Mlle)\.?\s+[A-Z][a-zàâçéèêëïîôùûü\-\']+\b"),
     ],
     "de": [
-        re.compile(r"\b[A-Z][a-zäöüß]+ [A-Z][a-zäöüß]+\b"),
-        re.compile(r"\b(?:Herr|Frau)\.?\s+[A-Z][a-zäöüß]+\b"),
+        re.compile(r"\b[A-Z][a-zäöüß\-\']+ [A-Z][a-zäöüß\-\']+\b"),
+        re.compile(r"\b(?:Herr|Frau)\.?\s+[A-Z][a-zäöüß\-\']+\b"),
     ],
     "tr": [
         re.compile(r"\b[A-ZÇĞİÖŞÜ][a-zçğıöşü]+ [A-ZÇĞİÖŞÜ][a-zçğıöşü]+\b"),
@@ -139,13 +141,36 @@ class DLPPatternRegistry:
     ) -> None:
         self._catalogue: Dict[str, PatternDescriptor] = {}
         self._build_catalogue(load_groups)
-        _log.info("DLP registry loaded %d pattern(s)", len(self._catalogue))
+        # Pre-compiled category mega-regexes (built per locale)
+        self._locale_category_regexes: Dict[str, Dict[str, re.Pattern]] = {}
+        self._locale_category_type_maps: Dict[str, Dict[str, List[str]]] = {}
+        # We pre-compile only the "Global" and "Common" locales on start
+        for loc in ["*", "en", "es", "fr", "de", "tr", "ar", "ja", "zh"]:
+            self._compile_for_locale(loc)
+        _log.info(
+            "DLP registry loaded %d pattern(s) across %d locale(s)",
+            len(self._catalogue),
+            len(self._locale_category_regexes),
+        )
 
     # ── public helpers ────────────────────────────────────────────────────
 
     @property
     def type_names(self) -> List[str]:
         return list(self._catalogue.keys())
+
+    def get_category_regexes(self, locale: str = "en") -> Dict[str, re.Pattern]:
+        """Return the pre-compiled per-category Mega-Regexes for a locale.
+
+        If the locale isn't targetized yet, it falls back to the common pool.
+        """
+        if locale not in self._locale_category_regexes:
+            self._compile_for_locale(locale)
+        return self._locale_category_regexes[locale]
+
+    def get_category_type_map(self, category_name: str, locale: str = "en") -> List[str]:
+        """Return ordered list of type names in a category regex."""
+        return self._locale_category_type_maps.get(locale, {}).get(category_name, [])
 
     def iter_descriptors(self):
         """Yield ``(type_name, PatternDescriptor)`` pairs."""
@@ -161,6 +186,56 @@ class DLPPatternRegistry:
     def address_patterns_for(self, lang: str) -> List[re.Pattern]:
         """Return locale-tuned address regexes, falling back to English."""
         return LOCALE_ADDRESS_RULES.get(lang, LOCALE_ADDRESS_RULES["en"])
+
+    # ── internal mega-regex compiler ──────────────────────────────────────
+
+    def _compile_for_locale(self, locale: str) -> None:
+        """Build one compiled regex per SensitiveCategory for a specific locale.
+
+        Includes all Priority 0 (Global) patterns plus patterns matching the locale.
+        """
+        # Filter patterns for this locale
+        locale_pool: Dict[str, List[tuple]] = {}
+        for type_name, desc in self._catalogue.items():
+            # Include if: (Global) OR (Matches Locale)
+            if "*" in desc.supported_locales or locale in desc.supported_locales:
+                cat_key = desc.category.value
+                locale_pool.setdefault(cat_key, []).append((type_name, desc))
+
+        self._locale_category_regexes[locale] = {}
+        self._locale_category_type_maps[locale] = {}
+
+        for cat_key, entries in locale_pool.items():
+            # Sort by specificity (Length + Validator)
+            entries.sort(
+                key=lambda e: (
+                    0 if e[1].validator_tag else 1,
+                    -len(e[1].compiled_re.pattern),
+                )
+            )
+
+            parts: List[str] = []
+            type_order: List[str] = []
+            bucket_flags = 0
+            for type_name, desc in entries:
+                raw = desc.compiled_re.pattern
+                if desc.compiled_re.flags & re.IGNORECASE:
+                    bucket_flags |= re.IGNORECASE
+                parts.append(f"(?P<{type_name}>{raw})")
+                type_order.append(type_name)
+
+            combined = "|".join(parts)
+            try:
+                self._locale_category_regexes[locale][cat_key] = re.compile(combined, flags=bucket_flags)
+                self._locale_category_type_maps[locale][cat_key] = type_order
+            except re.error as exc:
+                _log.error(
+                    "Failed to compile category regex for '%s' in locale '%s': %s",
+                    cat_key, locale, exc,
+                )
+                # Fall back: no mega-regex for this category; scanner will
+                # iterate individual patterns instead.
+
 
     # ── internal builder ──────────────────────────────────────────────────
 
@@ -178,7 +253,7 @@ class DLPPatternRegistry:
             # ── FINANCIAL ─────────────────────────────────────────────────
             (
                 "US_SSN",
-                r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
+                r"(?<!\d)(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?!\d)",
                 frozenset({"ssn", "social security", "tax id", "taxpayer"}),
                 0.95,
                 SensitiveCategory.FINANCIAL,
@@ -186,7 +261,7 @@ class DLPPatternRegistry:
             ),
             (
                 "CREDIT_CARD_NUMBER",
-                r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b",
+                r"(?<!\d)(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}(?!\d)",
                 frozenset({"card", "credit", "visa", "mastercard", "amex", "payment"}),
                 0.97,
                 SensitiveCategory.FINANCIAL,
@@ -218,7 +293,7 @@ class DLPPatternRegistry:
             ),
             (
                 "US_ABA_ROUTING",
-                r"\b\d{9}\b",
+                r"(?<!\d)\d{9}(?!\d)",
                 frozenset({"routing", "aba", "wire", "bank"}),
                 0.88,
                 SensitiveCategory.FINANCIAL,
@@ -226,15 +301,15 @@ class DLPPatternRegistry:
             ),
             (
                 "BANK_ACCT_NUM",
-                r"\b\d{8,17}\b",
+                r"(?<!\d)\d{8,17}(?!\d)",
                 frozenset({"account", "checking", "savings", "deposit", "bank"}),
-                0.83,
+                0.50,
                 SensitiveCategory.FINANCIAL,
-                None,
+                "luhn_soft",
             ),
             (
                 "SWIFT_BIC",
-                r"(?i)\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b",
+                r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b",
                 frozenset({"swift", "bic", "bank code", "transfer"}),
                 0.60,
                 SensitiveCategory.FINANCIAL,
@@ -252,17 +327,17 @@ class DLPPatternRegistry:
             ),
             (
                 "PHONE_NUM",
-                r"(?:\+?[1-9]\d{0,3}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}",
+                r"(?<!\d)(?:\+?[1-9]\d{0,3}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}(?!\d)",
                 frozenset({"phone", "call", "mobile", "tel", "whatsapp", "number"}),
-                0.92,
+                0.80,  # Lowered from 0.92 to allow Fuzzy ID (0.85) to win overlaps
                 SensitiveCategory.CONTACT,
                 None,
             ),
             (
                 "PHONE_NUM_INTL",
-                r"\+(?:44|33|49|90|966|971)[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}",
+                r"(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)",
                 frozenset({"phone", "call", "mobile", "tel"}),
-                0.93,
+                0.80,  # Lowered from 0.93
                 SensitiveCategory.CONTACT,
                 None,
             ),
@@ -304,7 +379,7 @@ class DLPPatternRegistry:
                 "US_DRIVERS_LIC",
                 r"\b(?:[A-Z]\d{7,12}|\d{7,12}[A-Z]?)\b",
                 frozenset({"driver", "license", "licence", "dl", "dmv"}),
-                0.85,
+                0.55,
                 SensitiveCategory.PERSONAL,
                 None,
             ),
@@ -386,7 +461,7 @@ class DLPPatternRegistry:
                 frozenset({"nino", "national insurance", "ni number", "uk"}),
                 0.90,
                 SensitiveCategory.IDENTITY_INTL,
-                None,
+                "uk_nino",
             ),
             (
                 "CA_SOCIAL_INS",
@@ -394,7 +469,7 @@ class DLPPatternRegistry:
                 frozenset({"sin", "social insurance", "canada", "canadian"}),
                 0.89,
                 SensitiveCategory.IDENTITY_INTL,
-                None,
+                "ca_sin",
             ),
             (
                 "FR_INSEE_NUM",
@@ -402,7 +477,9 @@ class DLPPatternRegistry:
                 frozenset({"insee", "sécurité sociale", "france", "numéro"}),
                 0.88,
                 SensitiveCategory.IDENTITY_INTL,
-                None,
+                "fr_insee",
+                True, # is_high_entropy
+                ["*", "fr"],
             ),
             (
                 "DE_STEUER_ID",
@@ -411,6 +488,8 @@ class DLPPatternRegistry:
                 0.87,
                 SensitiveCategory.IDENTITY_INTL,
                 None,
+                True,
+                ["*", "de"],
             ),
             (
                 "TR_TCID",
@@ -419,6 +498,8 @@ class DLPPatternRegistry:
                 0.92,
                 SensitiveCategory.IDENTITY_INTL,
                 "tcid",
+                True,
+                ["*", "tr"],
             ),
             (
                 "SA_NATIONAL_ID",
@@ -427,6 +508,8 @@ class DLPPatternRegistry:
                 0.91,
                 SensitiveCategory.IDENTITY_INTL,
                 "saudi_nid",
+                True,
+                ["*", "ar"],
             ),
             (
                 "UAE_EMIRATES_ID",
@@ -435,12 +518,54 @@ class DLPPatternRegistry:
                 0.93,
                 SensitiveCategory.IDENTITY_INTL,
                 "luhn",
+                True,
+                ["*", "ar"],
+            ),
+            (
+                "CN_ID",
+                r"\b[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]\b",
+                frozenset({"身份证", "身份号码", "id card", "china"}),
+                0.95,
+                SensitiveCategory.IDENTITY_INTL,
+                "cn_id",
+                True,
+                ["*", "zh"],
+            ),
+            (
+                "JA_MY_NUMBER",
+                r"\b\d{12}\b",
+                frozenset({"マイナンバー", "個人番号", "my number", "japan"}),
+                0.94,
+                SensitiveCategory.IDENTITY_INTL,
+                "ja_id",
+                True,
+                ["*", "ja"],
+            ),
+            (
+                "ES_DNI",
+                r"\b(?:\d{8}[A-Z]|[XYZ]\d{7}[A-Z])\b",
+                frozenset({"dni", "nie", "identidad", "nif", "spain"}),
+                0.94,
+                SensitiveCategory.IDENTITY_INTL,
+                "es_id",
+                True,
+                ["*", "es"],
+            ),
+            (
+                "INTL_PASSPORT",
+                r"\b[A-Z0-9]{6,12}\b",
+                frozenset({"passport", "travel", "immigration", "visa"}),
+                0.60,
+                SensitiveCategory.IDENTITY_INTL,
+                None,
+                True,
+                ["*"],
             ),
 
             # ── CORPORATE ─────────────────────────────────────────────────
             (
                 "CORP_EMPLOYEE_ID",
-                r"(?i)\b(?:EMP|EMPLOYEE|ID)[:\s]?[A-Z0-9]{5,10}\b",
+                r"\b(?:EMP|EMPLOYEE|ID)[:\s]?[A-Z0-9]{5,10}\b",
                 frozenset({"employee", "staff", "personnel", "worker"}),
                 0.55,
                 SensitiveCategory.CORPORATE,
@@ -449,13 +574,28 @@ class DLPPatternRegistry:
         ]
 
         for entry in raw:
-            type_name, regex_str, terms, risk, cat, vtag = entry
+            # Handle entries with or without explicit locale/entropy (backward compatibility for build logic)
+            if len(entry) == 8:
+                type_name, regex_str, terms, risk, cat, vtag, entropy, locales = entry
+            else:
+                type_name, regex_str, terms, risk, cat, vtag = entry
+                entropy = True if vtag else False
+                locales = ["*"]
+
             if restrict is not None and cat not in restrict:
                 continue
+            # Handle explicit case-insensitivity without breaking mega-regex compilation
+            flags = 0
+            if regex_str.startswith("(?i)"):
+                regex_str = regex_str[4:]
+                flags = re.IGNORECASE
+
             self._catalogue[type_name] = PatternDescriptor(
-                compiled_re=re.compile(regex_str),
+                compiled_re=re.compile(regex_str, flags=flags),
                 proximity_terms=terms,
                 base_risk=risk,
                 category=cat,
                 validator_tag=vtag,
+                is_high_entropy=entropy,
+                supported_locales=locales,
             )

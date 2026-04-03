@@ -52,7 +52,7 @@ class DLPConfidenceScorer:
         keyword_boost=0.10,
         validator_override=0.99,
         max_confidence=0.99,
-        penalty_factor=0.65,
+        validator_failure_penalty=0.99,
     )
 
     def __init__(self, **overrides) -> None:
@@ -61,7 +61,7 @@ class DLPConfidenceScorer:
         self._kw_boost: float = cfg["keyword_boost"]
         self._val_override: float = cfg["validator_override"]
         self._ceil: float = cfg["max_confidence"]
-        self._penalty: float = cfg["penalty_factor"]
+        self._val_penalty: float = cfg["validator_failure_penalty"]
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -100,7 +100,7 @@ class DLPConfidenceScorer:
         if validator_passed is True:
             return self._val_override
         if validator_passed is False:
-            return min(self._ceil, base_risk * self._penalty)
+            return max(0.0, base_risk - self._val_penalty)
 
         # Extract the context window around the match
         window_lo = max(0, match_start - self._window)

@@ -23,7 +23,7 @@ const DEFAULT_CONFIG: Required<ScorerConfig> = {
   keywordBoost: 0.10,
   validatorOverride: 0.99,
   maxConfidence: 0.99,
-  penaltyFactor: 0.65,
+  penaltyFactor: 0.99, // Renamed functionally to validator failure penalty subtraction
 };
 
 export interface ScoreInput {
@@ -77,7 +77,7 @@ export class DLPConfidenceScorer {
     // Hard-validator short-circuits
     if (input.validatorPassed === true) return this.valOverride;
     if (input.validatorPassed === false) {
-      return Math.min(this.ceil, input.baseRisk * this.penalty);
+      return Math.max(0.0, input.baseRisk - this.penalty);
     }
 
     // Extract the context window around the match

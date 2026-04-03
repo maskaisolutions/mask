@@ -46,7 +46,7 @@ describe('TestEncodeDecodePublicAPI', () => {
 
   test('test_roundtrip_email', async () => {
     const token = await encode("user@example.com");
-    expect(token.endsWith("@email.com")).toBe(true);
+    expect(token.endsWith("@example.com")).toBe(true);
     expect(await decode(token)).toBe("user@example.com");
   });
 

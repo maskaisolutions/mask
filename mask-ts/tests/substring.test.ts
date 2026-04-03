@@ -50,7 +50,7 @@ describe('TestSubstringDetokenization', () => {
   });
 
   test('test_detokenize_text_lenient', async () => {
-    const bogus = "tkn-12345678@email.com";
+    const bogus = "tkn-12345678@example.com";
     const paragraph = `Hello ${bogus}`;
     
     const restored = await detokenizeText(paragraph);

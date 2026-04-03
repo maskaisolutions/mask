@@ -41,7 +41,7 @@ describe('TestLangchainHooks', () => {
             const result = await secure.run(token, "Welcome");
 
             expect(result.target).not.toBe("user@example.com");
-            expect(result.target).toMatch(/@email\.com$/);
+            expect(result.target).toMatch(/@example\.com$/);
         });
     });
 
@@ -89,7 +89,7 @@ describe('TestLangchainHooks', () => {
 
             const result = await sendEmail(token, "Hello");
             expect(result).not.toContain("dev@mask.ai");
-            expect(result).toContain("@email.com");
+            expect(result).toContain("@mask.ai");
         });
 
         test('test_secure_tool_preserves_non_pii', async () => {

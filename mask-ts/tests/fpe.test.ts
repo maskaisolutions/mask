@@ -17,7 +17,7 @@ describe('TestFPETokenGeneration', () => {
 
   test('test_email_format', async () => {
     const token = await generateFPEToken("user@company.io");
-    expect(token.endsWith("@email.com")).toBe(true);
+    expect(token.endsWith("@company.io")).toBe(true);
     expect(token.startsWith("tkn-")).toBe(true);
     expect(token).toMatch(/^[^@]+@[^@]+\.[^@]+$/);
   });
@@ -60,7 +60,7 @@ describe('TestFPETokenGeneration', () => {
     const t1 = await generateFPEToken("a@b.com");
     const t2 = await generateFPEToken("a@b.com");
     expect(t1).toBe(t2);
-    expect(t1.endsWith("@email.com")).toBe(true);
+    expect(t1.endsWith("@b.com")).toBe(true);
   });
 
   test('test_different_inputs_different_tokens', () => {
@@ -85,7 +85,7 @@ describe('TestFPETokenGeneration', () => {
   });
 
   test('test_whitespace_stripped_determinism', async () => {
-    expect(await generateFPEToken(" someone@email.com ")).toBe(await generateFPEToken("someone@email.com"));
+    expect(await generateFPEToken(" someone@example.com ")).toBe(await generateFPEToken("someone@example.com"));
   });
 
   test('test_fail_fast_when_key_missing', async () => {
@@ -100,7 +100,7 @@ describe('TestFPETokenGeneration', () => {
 
 describe('TestLooksLikeToken', () => {
   test('test_email_token', () => {
-    expect(looksLikeToken("tkn-abcd1234@email.com")).toBe(true);
+    expect(looksLikeToken("tkn-abcd1234abcd@example.com")).toBe(true);
   });
 
   test('test_phone_token', () => {

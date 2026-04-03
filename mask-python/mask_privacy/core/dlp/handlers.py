@@ -230,6 +230,155 @@ def check_saudi_nid(raw: str) -> bool:
     return total % 10 == 0
 
 
+# ── French INSEE (Mod-97) ───────────────────────────────────────────────────
+
+def check_fr_insee(raw: str) -> bool:
+    """Validate French Social Security Number (NIR) using Modulo 97.
+    
+    Replaces Corsican identifiers '2A' with '19' and '2B' with '18'.
+    Expects exactly 15 characters (13 for the key, 2 for the checksum).
+    """
+    cleaned = raw.replace(" ", "").upper()
+    if len(cleaned) != 15:
+        return False
+    # Handle Corsica
+    cleaned = cleaned.replace("2A", "19").replace("2B", "18")
+    if not cleaned.isdigit():
+        return False
+        
+    base_number = int(cleaned[:13])
+    expected_key = int(cleaned[13:])
+    
+    calculated_key = 97 - (base_number % 97)
+    return calculated_key == expected_key
+
+
+# ── Canadian SIN (Luhn-9) ───────────────────────────────────────────────────
+
+def check_ca_sin(raw: str) -> bool:
+    """Validate Canadian Social Insurance Number.
+    
+    Applies the Modulo 10 (Luhn) algorithm specifically for 9 digits.
+    """
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) != 9:
+        return False
+        
+    total = 0
+    for idx, ch in enumerate(digits):
+        val = int(ch)
+        if idx % 2 == 1:  # 0-indexed, so 1 is 2nd digit, 3 is 4th, etc.
+            val *= 2
+            if val > 9:
+                val -= 9
+        total += val
+    return total % 10 == 0
+
+
+# ── UK National Insurance Number (NINO) ──────────────────────────────────────
+
+_UK_NINO_REGEX = re.compile(
+    r"^(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-PR-TW-Z]{2}[0-9]{6}[A-D]$"
+)
+
+def check_uk_nino(raw: str) -> bool:
+    """Validate a UK National Insurance Number against prefix/suffix constraints.
+    
+    Cannot use letters D, F, I, Q, U, V, and O (O handled mostly by first char).
+    Specific prefixes are forbidden (BG, GB, NK, KN, TN, NT, ZZ).
+    Must end with A, B, C, or D.
+    """
+    cleaned = raw.replace(" ", "").upper()
+    if len(cleaned) != 9:
+        return False
+    return bool(_UK_NINO_REGEX.match(cleaned))
+
+
+# ── Chinese ID (18-digit, ISO 7064:1983.MOD 11-2) ───────────────────────────
+
+def check_cn_id(raw: str) -> bool:
+    """Validate 18-digit Chinese Resident Identity Card.
+    
+    Algorithm uses a weighted sum of the first 17 digits, modulo 11.
+    The 18th char is a check digit (0-9 or 'X').
+    """
+    cleaned = re.sub(r"[^0-9X]", "", raw.upper())
+    if len(cleaned) != 18:
+        return False
+    
+    # Weights for first 17 digits
+    weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+    # Check digit mapping (remainder -> char)
+    check_digits = "10X98765432"
+    
+    try:
+        total = sum(int(cleaned[i]) * weights[i] for i in range(17))
+        remainder = total % 11
+        return cleaned[17] == check_digits[remainder]
+    except (ValueError, IndexError):
+        return False
+
+
+# ── Japanese Individual Number (12-digit, Modulo 11) ────────────────────────
+
+def check_ja_id(raw: str) -> bool:
+    """Validate 12-digit Japanese Individual Number (My Number).
+    
+    Uses a weighted sum modulo 11.
+    """
+    cleaned = re.sub(r"\D", "", raw)
+    if len(cleaned) != 12:
+        return False
+        
+    d = [int(c) for c in cleaned]
+    # Weights for digits 1-11
+    # Pn * Qn where Qn = (n % 6) + 1 if 1<=n<=6, else (n-6)%6 + 1? 
+    # Standard: Qn = n+1 for 1<=n<=6, Qn = n-5 for 7<=n<=11
+    # Actually simpler: [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2] starting from d11 down to d1
+    weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2] # for digits cleaned[0:11] in reverse?
+    # Correct weights (from digit 11 to 1): 2, 3, 4, 5, 6, 7, 2, 3, 4, 5, 6
+    weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
+    
+    total = sum(d[i] * weights[i] for i in range(11))
+    remainder = total % 11
+    
+    if remainder <= 1:
+        expected = 0
+    else:
+        expected = 11 - remainder
+        
+    return d[11] == expected
+
+
+# ── Spanish DNI/NIE (8 digits + 1 letter) ───────────────────────────────────
+
+def check_es_id(raw: str) -> bool:
+    """Validate Spanish DNI (National ID) or NIE (Foreigner ID).
+    
+    Uses a simple modulo 23 check digit (letter).
+    """
+    cleaned = re.sub(r"[\s-]", "", raw.upper())
+    if len(cleaned) != 9:
+        return False
+        
+    # Handle NIE prefixes (X=0, Y=1, Z=2)
+    mapping = {"X": "0", "Y": "1", "Z": "2"}
+    first_char = cleaned[0]
+    if first_char in mapping:
+        num_str = mapping[first_char] + cleaned[1:8]
+    elif first_char.isdigit():
+        num_str = cleaned[:8]
+    else:
+        return False
+        
+    if not num_str.isdigit():
+        return False
+        
+    num = int(num_str)
+    valid_letters = "TRWAGMYFPDXBNJZSQVHLCKE"
+    return cleaned[8] == valid_letters[num % 23]
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 
 _VALIDATOR_DISPATCH = {
@@ -242,6 +391,12 @@ _VALIDATOR_DISPATCH = {
     "ipv4":       check_ipv4_octets,
     "tcid":       check_tcid_number,
     "saudi_nid":  check_saudi_nid,
+    "fr_insee":   check_fr_insee,
+    "ca_sin":     check_ca_sin,
+    "uk_nino":    check_uk_nino,
+    "cn_id":      check_cn_id,
+    "ja_id":      check_ja_id,
+    "es_id":      check_es_id,
 }
 
 

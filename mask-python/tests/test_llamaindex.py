@@ -55,7 +55,7 @@ class TestLlamaindexMaskToolWrapper:
         result = secure_tool(email=token, prompt="Give me the records")
 
         assert result["target"] != "admin@hospital.com"
-        assert result["target"].endswith("@email.com")
+        assert result["target"].endswith("@hospital.com")
 
 
 class TestLlamaindexMaskCallbackHandler:
@@ -90,7 +90,7 @@ class TestLlamaindexMaskCallbackHandler:
         )
 
         assert payload["response"]["leaked_email"] != "john.smith@gmail.com"
-        assert payload["response"]["leaked_email"].endswith("@email.com")
+        assert payload["response"]["leaked_email"].endswith("@gmail.com")
 
 
 class TestLlamaindexMagicHooks:

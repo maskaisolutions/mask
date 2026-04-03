@@ -42,7 +42,7 @@ describe('TestLlamaindexHooks', () => {
             const result = await secureTool.run(token, "Give me the records");
 
             expect(result.target).not.toBe("admin@hospital.com");
-            expect(result.target).toMatch(/@email\.com$/);
+            expect(result.target).toMatch(/@hospital\.com$/);
         });
     });
 
