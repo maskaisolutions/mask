@@ -1,8 +1,16 @@
 import { describe, test, expect } from '@jest/globals';
-import { REGEX_PATTERNS, PresidioScanner } from '../src/core/scanner';
+import { DLPPatternRegistry } from '../src/core/dlp/registry';
+import { checkAbaRouting } from '../src/core/dlp/handlers';
+
+const registry = new DLPPatternRegistry();
+const getPattern = (name: string) => {
+  const desc = registry.descriptorFor(name);
+  if (!desc) throw new Error(`Pattern ${name} not found in registry`);
+  return new RegExp(desc.compiledRe.source, 'g');
+};
 
 describe('TestInternationalPhonePatterns', () => {
-  const pattern = new RegExp(REGEX_PATTERNS["PHONE_NUMBER_INTL"].source, 'g');
+  const pattern = getPattern("PHONE_NUM_INTL");
 
   test.each([
     "+44 20 7946 0958",
@@ -27,7 +35,7 @@ describe('TestInternationalPhonePatterns', () => {
 });
 
 describe('TestUSRoutingNumber', () => {
-  const pattern = new RegExp(REGEX_PATTERNS["US_ROUTING_NUMBER"].source, 'g');
+  const pattern = getPattern("US_ABA_ROUTING");
 
   test('test_regex_matches_9_digit_number', () => {
     pattern.lastIndex = 0;
@@ -40,23 +48,20 @@ describe('TestUSRoutingNumber', () => {
   });
 
   test('test_aba_checksum_valid', () => {
-    // @ts-ignore - accessing protected static for test
-    expect(PresidioScanner._abaChecksum("021000021")).toBe(true);
+    expect(checkAbaRouting("021000021")).toBe(true);
   });
 
   test('test_aba_checksum_invalid', () => {
-    // @ts-ignore
-    expect(PresidioScanner._abaChecksum("123456789")).toBe(false);
+    expect(checkAbaRouting("123456789")).toBe(false);
   });
 
   test('test_aba_checksum_wrong_length', () => {
-    // @ts-ignore
-    expect(PresidioScanner._abaChecksum("12345")).toBe(false);
+    expect(checkAbaRouting("12345")).toBe(false);
   });
 });
 
 describe('TestUSPassport', () => {
-  const pattern = new RegExp(REGEX_PATTERNS["US_PASSPORT"].source, 'g');
+  const pattern = getPattern("US_PASSPORT_NUM");
 
   test.each([
     "C12345678",
@@ -79,7 +84,7 @@ describe('TestUSPassport', () => {
 });
 
 describe('TestDateOfBirth', () => {
-  const pattern = new RegExp(REGEX_PATTERNS["DATE_OF_BIRTH"].source, 'g');
+  const pattern = getPattern("BIRTH_DATE");
 
   test.each([
     "01/15/1990",

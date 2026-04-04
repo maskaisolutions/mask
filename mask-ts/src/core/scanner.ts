@@ -27,31 +27,12 @@ const _dlpPatternRegistry = new DLPPatternRegistry();
 const _dlpValidationEngine = new DLPValidationEngine();
 const _dlpConfidenceScorer = new DLPConfidenceScorer();
 
-/** Regex patterns for Tier 1 deterministic detection */
-export const REGEX_PATTERNS: Record<string, RegExp> = {
-  "EMAIL_ADDRESS": /[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g,
-  "PHONE_NUMBER": /(?<!\d)(?:\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}|\d{3}[\s\-.]?\d{4})(?!\d)/g,
-  "PHONE_NUMBER_INTL": /(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)/g,
-  "US_SSN": /(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)/g,
-  "CREDIT_CARD": /(?<!\d)(?:\d{4}[ \-]?){3}\d{4}(?!\d)/g,
-  "US_ROUTING_NUMBER": /(?<!\d)\d{9}(?!\d)/g,
-  "US_PASSPORT": /\b[A-Z]\d{8}\b/g,
-  "DATE_OF_BIRTH": /\b(?:0[1-9]|1[0-2])\/(?:0[1-9]|[12]\d|3[01])\/(?:19|20)\d{2}\b|\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b/g,
-};
-
-/** Keywords whose presence boosts detection aggressiveness */
-export const CONTEXT_KEYWORDS = new Set([
-  "account number", "ssn", "phone", "credit card",
-  "iban", "bank", "email", "pii", "personal info",
-]);
-
 export class BaseScanner {
   protected _supportedEntities: string[];
 
   constructor() {
     this._supportedEntities = [
-      "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD",
-      "US_BANK_NUMBER", "CRYPTO", "IBAN_CODE", "IP_ADDRESS", "PERSON",
+      "PERSON", "LOCATION", "ORGANIZATION",
     ];
   }
 
@@ -190,32 +171,17 @@ export class BaseScanner {
     return [reconstruct(text, resolved), entities];
   }
 
+  /** Tier 1 — Deterministic detection (Legacy: Redirected to DLP) */
   protected async _tier1CollectSpans(
     text: string,
     boostEntities: Set<string>,
     aggressive: boolean,
     confidenceThreshold: number,
   ): Promise<Span[]> {
-    const spans: Span[] = [];
-    for (const [entityType, pattern] of Object.entries(REGEX_PATTERNS)) {
-      const re = new RegExp(pattern.source, pattern.flags);
-      let match: RegExpExecArray | null;
-      while ((match = re.exec(text)) !== null) {
-        const val = match[0];
-        if (looksLikeToken(val)) continue;
-        let confidence = (aggressive || boostEntities.has(entityType.toLowerCase().replace(/_/g, ' '))) ? 1.0 : 0.95;
-        if (entityType === 'CREDIT_CARD' && BaseScanner._luhnChecksum(val)) confidence = Math.max(confidence, 0.99);
-        if (entityType === 'US_ROUTING_NUMBER' && !BaseScanner._abaChecksum(val)) continue;
-        if (confidence >= confidenceThreshold) {
-          spans.push({ start: match.index, end: match.index + val.length,
-            entityType, originalValue: val, confidence, method: 'regex' });
-        }
-      }
-    }
-    return spans;
+    return this._tier0CollectSpans(text, confidenceThreshold);
   }
 
-  /** Backward-compat wrapper. */
+  /** Backward-compat wrapper. Redirected to DLP. */
   protected async _tier1Regex(
     text: string,
     encodeFn: (val: string, options?: any) => Promise<string>,
@@ -223,15 +189,7 @@ export class BaseScanner {
     aggressive: boolean,
     confidenceThreshold: number,
   ): Promise<[string, any[]]> {
-    const spans = await this._tier1CollectSpans(text, boostEntities, aggressive, confidenceThreshold);
-    const resolved = resolveOverlaps(spans);
-    const entities: any[] = [];
-    await Promise.all(resolved.map(async (span) => {
-      span.maskedValue = await encodeFn(span.originalValue, { entityType: span.entityType });
-      entities.push({ type: span.entityType, value: span.originalValue,
-        method: span.method, confidence: span.confidence, masked_value: span.maskedValue });
-    }));
-    return [reconstruct(text, resolved), entities];
+    return this._tier0Dlp(text, encodeFn, confidenceThreshold);
   }
 
   protected async _tier2Nlp(
@@ -248,8 +206,14 @@ export class BaseScanner {
     if (!context) return new Set();
     const lowered = context.toLowerCase();
     const boosted = new Set<string>();
-    for (const kw of CONTEXT_KEYWORDS) {
-      if (lowered.includes(kw)) boosted.add(kw);
+    // Scan registry descriptors to see if any proximity terms match the context
+    for (const [, desc] of _dlpPatternRegistry.iterDescriptors()) {
+      for (const term of desc.proximityTerms) {
+        if (lowered.includes(term)) {
+          boosted.add(desc.category.toLowerCase());
+          break;
+        }
+      }
     }
     return boosted;
   }
@@ -266,7 +230,7 @@ export class BaseScanner {
   ): Promise<string> {
     if (!text || typeof text !== 'string') return text;
 
-    const pipeline = options.pipeline || ['dlp', 'regex', 'checksum', 'nlp'];
+    const pipeline = options.pipeline || ['dlp', 'nlp'];
     const _encode = options.encodeFn || encode;
     const confidenceThreshold = options.confidenceThreshold ?? 0.7;
     const boost = this._resolveBoost(options.context);
@@ -274,11 +238,8 @@ export class BaseScanner {
     // ── Span-accumulation phase (no string mutation) ─────────────────────
     const allSpans: Span[] = [];
 
-    if (pipeline.includes('dlp')) {
+    if (pipeline.includes('dlp') || pipeline.includes('regex') || pipeline.includes('checksum')) {
       allSpans.push(...await this._tier0CollectSpans(text, confidenceThreshold));
-    }
-    if (pipeline.includes('regex') || pipeline.includes('checksum')) {
-      allSpans.push(...await this._tier1CollectSpans(text, boost, !!options.aggressive, confidenceThreshold));
     }
 
     // ── Single-pass resolve + reconstruct ────────────────────────────────
@@ -308,7 +269,7 @@ export class BaseScanner {
   ): Promise<any[]> {
     if (!text || typeof text !== 'string') return [];
 
-    const pipeline = options.pipeline || ['dlp', 'regex', 'checksum', 'nlp'];
+    const pipeline = options.pipeline || ['dlp', 'nlp'];
     const _encode = options.encodeFn || encode;
     const confidenceThreshold = options.confidenceThreshold ?? 0.7;
     const boost = this._resolveBoost(options.context);
@@ -316,11 +277,8 @@ export class BaseScanner {
 
     // ── Span-accumulation phase ──────────────────────────────────────────
     const allSpans: Span[] = [];
-    if (pipeline.includes('dlp')) {
+    if (pipeline.includes('dlp') || pipeline.includes('regex') || pipeline.includes('checksum')) {
       allSpans.push(...await this._tier0CollectSpans(text, confidenceThreshold));
-    }
-    if (pipeline.includes('regex') || pipeline.includes('checksum')) {
-      allSpans.push(...await this._tier1CollectSpans(text, boost, !!options.aggressive, confidenceThreshold));
     }
 
     const resolved = resolveOverlaps(allSpans);

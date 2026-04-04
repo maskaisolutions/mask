@@ -79,10 +79,10 @@ const RAW_PATTERNS: RawEntry[] = [
     ["ssn", "social security", "tax id", "taxpayer"], 0.95, SensitiveCategory.FINANCIAL, "ssn_area"],
 
   ["CREDIT_CARD_NUMBER", "\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b",
-    ["card", "credit", "visa", "mastercard", "amex", "payment"], 0.97, SensitiveCategory.FINANCIAL, "luhn"],
+    ["card", "credit", "visa", "mastercard", "amex", "payment", "tarjeta", "credito", "debito", "pago"], 0.97, SensitiveCategory.FINANCIAL, "luhn"],
 
   ["INTL_BANK_IBAN", "\\b[A-Z]{2}\\d{2}[A-Z0-9]{4}\\d{7}[A-Z0-9]{0,16}\\b",
-    ["iban", "swift", "sepa", "wire", "bank transfer"], 0.96, SensitiveCategory.FINANCIAL, "iban"],
+    ["iban", "swift", "sepa", "wire", "bank transfer", "cuenta", "banco", "transferencia"], 0.96, SensitiveCategory.FINANCIAL, "iban"],
 
   ["CRYPTO_BTC", "\\b(?:[13][a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[a-z0-9]{39,59})\\b",
     ["bitcoin", "btc", "wallet", "crypto"], 0.94, SensitiveCategory.FINANCIAL, "btc_format"],
@@ -96,15 +96,18 @@ const RAW_PATTERNS: RawEntry[] = [
   ["BANK_ACCT_NUM", /(?<!\d)\d{8,17}(?!\d)/,
     ["account", "checking", "savings", "deposit", "bank"], 0.50, SensitiveCategory.FINANCIAL, "luhn_soft"],
 
+  ["ES_CCC", "\\b\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{2}[-\\s]?\\d{10}\\b",
+    ["cuenta", "ccc", "banco", "sucursal", "entidad", "codigo cuenta cliente"], 0.90, SensitiveCategory.FINANCIAL, "es_ccc", true, ["*", "es"]],
+
   ["SWIFT_BIC", "\\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\\b",
     ["swift", "bic", "bank code", "transfer"], 0.60, SensitiveCategory.FINANCIAL, null],
 
   // ── CONTACT ────────────────────────────────────────────────────────
   ["EMAIL_ADDR", "\\b[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}\\b",
-    ["email", "mail", "contact", "address"], 0.99, SensitiveCategory.CONTACT, null],
+    ["email", "mail", "contact", "address", "correo", "electronico"], 0.99, SensitiveCategory.CONTACT, null],
 
-  ["PHONE_NUM", /(?<!\d)(?:\+?[1-9]\d{0,3}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}(?!\d)/,
-    ["phone", "call", "mobile", "tel", "whatsapp", "number"], 0.80, SensitiveCategory.CONTACT, null],
+  ["PHONE_NUM", /(?<!\d)(?:\+?[1-9]\d{0,3}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}(?!\d)/,
+    ["phone", "call", "mobile", "tel", "whatsapp", "number", "teléfono", "telefono", "movil", "celular", "llamada"], 0.80, SensitiveCategory.CONTACT, null],
 
   ["PHONE_NUM_INTL", /(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)/,
     ["phone", "call", "mobile", "tel"], 0.80, SensitiveCategory.CONTACT, null],
@@ -119,8 +122,8 @@ const RAW_PATTERNS: RawEntry[] = [
     ["mac", "hardware", "network", "device"], 0.91, SensitiveCategory.CONTACT, null],
 
   // ── PERSONAL ───────────────────────────────────────────────────────
-  ["BIRTH_DATE", "\\b(?:0[1-9]|1[0-2])[/-](?:0[1-9]|[12]\\d|3[01])[/-](?:19|20)\\d{2}\\b",
-    ["birth", "dob", "born", "birthday", "date of birth"], 0.88, SensitiveCategory.PERSONAL, null],
+  ["BIRTH_DATE", "\\b(?:(?:0[1-9]|1[0-2])[/-](?:0[1-9]|[12]\\d|3[01])[/-](?:19|20)\\d{2}|(?:19|20)\\d{2}[/-](?:0[1-9]|1[0-2])[/-](?:0[1-9]|[12]\\d|3[01]))\\b",
+    ["birth", "dob", "born", "birthday", "date of birth", "nacimiento", "fecha", "cumpleaños"], 0.88, SensitiveCategory.PERSONAL, null],
 
   ["US_DRIVERS_LIC", "\\b(?:[A-Z]\\d{7,12}|\\d{7,12}[A-Z]?)\\b",
     ["driver", "license", "licence", "dl", "dmv"], 0.55, SensitiveCategory.PERSONAL, null],
@@ -161,6 +164,9 @@ const RAW_PATTERNS: RawEntry[] = [
 
   ["ES_DNI", "(?:\\d{8}[A-Z]|[XYZ]\\d{7}[A-Z])",
     ["dni", "nie", "identidad", "nif", "spain"], 0.94, SensitiveCategory.IDENTITY_INTL, "es_id", true, ["*", "es"]],
+
+  ["ES_NUSS", "\\b\\d{2}[-\\s]?\\d{8}[-\\s]?\\d{2}\\b",
+    ["seguridad social", "nuss", "naf", "afiliacion"], 0.90, SensitiveCategory.IDENTITY_INTL, "es_nuss", true, ["*", "es"]],
 
   // ── CORPORATE ──────────────────────────────────────────────────────
   ["CORP_EMPLOYEE_ID", "(?:EMP|EMPLOYEE|ID)[:\\s]?[A-Z0-9]{5,10}",

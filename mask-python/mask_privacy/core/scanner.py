@@ -100,38 +100,6 @@ def _get_scanner_pool() -> ProcessPoolExecutor:
                 )
     return _SCANNER_POOL
 
-# Regex patterns for Tier 1 deterministic detection
-
-REGEX_PATTERNS: Dict[str, re.Pattern] = {
-    "EMAIL_ADDRESS": re.compile(
-        r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
-    ),
-    "PHONE_NUMBER": re.compile(r"(?<!\d)(?:\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}|\d{3}[\s\-.]?\d{4})(?!\d)"),
-    "PHONE_INTL": re.compile(r"(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)"),
-    # International phone numbers
-    "PHONE_NUMBER_INTL": re.compile(
-        r"\+(?:44|33|49)[\s\-.]?\(?\d{1,5}\)?(?:[\s\-.]?\d{2,4}){2,4}"
-    ),
-    "US_SSN": re.compile(r"\d{3}-\d{2}-\d{4}"),
-    "CREDIT_CARD": re.compile(r"(?:\d{4}[ \-]?){3}\d{4}"),
-    # US ABA Routing/Transit Number (9 digits, validated via checksum in Tier 1)
-    "US_ROUTING_NUMBER": re.compile(r"\b\d{9}\b"),
-    # US Passport: 1 letter followed by 8 digits
-    "US_PASSPORT": re.compile(r"\b[A-Z]\d{8}\b"),
-    # Date-of-birth patterns: MM/DD/YYYY and YYYY-MM-DD
-    "DATE_OF_BIRTH": re.compile(
-        r"\b(?:0[1-9]|1[0-2])/(?:0[1-9]|[12]\d|3[01])/(?:19|20)\d{2}\b"
-        r"|\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b"
-    ),
-}
-
-# Keywords whose mere presence in the context/prompt boosts detection
-# aggressiveness for nearby digit strings.
-CONTEXT_KEYWORDS = frozenset([
-    "account number", "ssn", "phone", "credit card",
-    "iban", "bank", "email", "pii", "personal info",
-])
-
 # ── DLP pipeline singletons (lazy-init, lightweight) ─────────────────────────
 _dlp_lang_resolver = LanguageContextResolver()
 _dlp_pattern_registry = DLPPatternRegistry()
@@ -155,8 +123,7 @@ class PresidioScanner:
         self.validation_engine = DLPValidationEngine()
 
         self._supported_entities = [
-            "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD",
-            "US_BANK_NUMBER", "CRYPTO", "IBAN_CODE", "IP_ADDRESS", "PERSON",
+            "PERSON", "LOCATION", "ORGANIZATION",
         ]
 
     def set_supported_entities(self, entities: List[str]) -> None:
@@ -295,27 +262,7 @@ class PresidioScanner:
             })
         return reconstruct(text, resolved), entities
 
-    # Tier 1 — Deterministic detection
-    @staticmethod
-    def _luhn_checksum(cc_number: str) -> bool:
-        """Validate a credit card number using the Luhn algorithm."""
-        digits = [int(d) for d in re.sub(r"\D", "", cc_number)]
-        odd = digits[-1::-2]
-        even = digits[-2::-2]
-        total = sum(odd) + sum(
-            sum(divmod(d * 2, 10)) for d in even
-        )
-        return total % 10 == 0
-
-    @staticmethod
-    def _aba_checksum(routing_number: str) -> bool:
-        """Validate a US ABA routing number using the checksum algorithm."""
-        d = [int(c) for c in routing_number]
-        if len(d) != 9:
-            return False
-        checksum = 3 * (d[0] + d[3] + d[6]) + 7 * (d[1] + d[4] + d[7]) + (d[2] + d[5] + d[8])
-        return checksum % 10 == 0
-
+    # Tier 1 — Deterministic detection (Legacy: Redirected to DLP)
     def _tier1_collect_spans(
         self,
         text: str,
@@ -323,49 +270,8 @@ class PresidioScanner:
         aggressive: bool,
         confidence_threshold: float,
     ) -> List[Span]:
-        """Run legacy Tier-1 regex patterns, return ``Span`` objects (no mutation)."""
-        spans: List[Span] = []
-        for entity_type, pattern in REGEX_PATTERNS.items():
-            for m in pattern.finditer(text):
-                val = m.group(0)
-                if looks_like_token(val):
-                    continue
-                confidence = 1.0 if (aggressive or entity_type.lower().replace("_", " ") in boost_entities) else 0.95
-                if entity_type == "CREDIT_CARD" and self._luhn_checksum(val):
-                    confidence = max(confidence, 0.99)
-                if entity_type == "US_ROUTING_NUMBER" and not self._aba_checksum(val):
-                    continue
-                if confidence >= confidence_threshold:
-                    spans.append(Span(
-                        start=m.start(), end=m.end(),
-                        entity_type=entity_type, original_value=val,
-                        confidence=confidence, method="regex",
-                    ))
-        return spans
-
-    def _tier1_regex(
-        self,
-        text: str,
-        encode_fn: Callable[[str], str],
-        boost_entities: frozenset,
-        aggressive: bool,
-        confidence_threshold: float,
-    ) -> tuple[str, List[Dict]]:
-        """Backward-compat wrapper around ``_tier1_collect_spans``."""
-        spans = self._tier1_collect_spans(text, boost_entities, aggressive, confidence_threshold)
-        resolved = resolve_overlaps(spans)
-        entities: List[Dict] = []
-        for span in resolved:
-            try:
-                span.masked_value = encode_fn(span.original_value, entity_type=span.entity_type)
-            except TypeError:
-                span.masked_value = encode_fn(span.original_value)
-            entities.append({
-                "start": span.start, "end": span.end, "type": span.entity_type,
-                "value": span.original_value, "method": span.method,
-                "confidence": span.confidence, "masked_value": span.masked_value,
-            })
-        return reconstruct(text, resolved), entities
+        """Redirected to DLP Tier 0."""
+        return self._tier0_collect_spans(text, confidence_threshold)
 
     # Tier 2 — Probabilistic NLP detection
 
@@ -436,7 +342,12 @@ class PresidioScanner:
         if not context:
             return frozenset()
         lowered = context.lower()
-        return frozenset(kw for kw in CONTEXT_KEYWORDS if kw in lowered)
+        # Scan registry descriptions to see if any proximity terms match the context
+        boosted = set()
+        for _, desc in self.registry.iter_descriptors():
+            if any(term in lowered for term in desc.proximity_terms):
+                boosted.add(desc.category.value.lower())
+        return frozenset(boosted)
 
     def scan_and_tokenize(
         self,
@@ -583,20 +494,6 @@ class PresidioScanner:
                 for i, e in enumerate(reversed(dlp_entities)):
                     idx = len(dlp_entities) - 1 - i
                     text = text[:dlp_entities[idx]["start"]] + tokens[idx] + text[dlp_entities[idx]["end"]:]
-
-        # --- Tier 1: Deterministic ---
-        if "regex" in pipeline or "checksum" in pipeline:
-            _, entities = self._tier1_regex(text, lambda x: x, boost, aggressive, confidence_threshold)
-            if entities:
-                vals = [(e["value"], e.get("type", "UNKNOWN")) for e in entities]
-                async def _enc(v, t):
-                    try: return await _encode(v, entity_type=t)
-                    except TypeError: return await _encode(v)
-                tokens = await asyncio.gather(*[_enc(v, t) for v, t in vals])
-                entities.sort(key=lambda x: x.get("start", 0), reverse=True)
-                for i, e in enumerate(reversed(entities)):
-                    idx = len(entities) - 1 - i
-                    text = text[:entities[idx]["start"]] + tokens[idx] + text[entities[idx]["end"]:]
 
         # --- Tier 2: Probabilistic (on the *remaining* text) ---
         if "nlp" in pipeline:

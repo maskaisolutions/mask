@@ -198,12 +198,58 @@ export function checkEsId(raw: string): boolean {
   return cleaned[8] === validLetters[num % 23];
 }
 
+// ── Spanish Social Security (NUSS) ──────────────────────────────────────────
+
+export function checkEsNuss(raw: string): boolean {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length !== 12) return false;
+
+  const a = parseInt(digits.slice(0, 2), 10);   // Province
+  const b = parseInt(digits.slice(2, 10), 10);  // Number
+  const c = parseInt(digits.slice(10), 10);     // Control
+
+  let check: number;
+  if (b < 10000000) {
+    check = (a * 10000000 + b) % 97;
+  } else {
+    check = Number(BigInt(digits.slice(0, 10)) % 97n);
+  }
+
+  return check === c;
+}
+
+// ── Spanish Bank Account (CCC) ──────────────────────────────────────────────
+
+export function checkEsCcc(raw: string): boolean {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length !== 20) return false;
+
+  const weights = [1, 2, 4, 8, 5, 10, 9, 7, 3, 6];
+
+  const calcDigit = (block: string): number => {
+    let s = 0;
+    for (let i = 0; i < block.length; i++) {
+      s += parseInt(block[i], 10) * weights[i];
+    }
+    let rem = 11 - (s % 11);
+    if (rem === 10) return 1;
+    if (rem === 11) return 0;
+    return rem;
+  };
+
+  const d1 = calcDigit("00" + digits.slice(0, 8));
+  const d2 = calcDigit(digits.slice(10));
+
+  return parseInt(digits[8], 10) === d1 && parseInt(digits[9], 10) === d2;
+}
+
 // ── Dispatcher ─────────────────────────────────────────────────────────────
 
 type ValidatorFn = (raw: string) => boolean;
 
 const VALIDATOR_DISPATCH: Record<string, ValidatorFn> = {
   luhn: checkLuhn,
+  luhn_soft: checkLuhn,
   ssn_area: checkSsnArea,
   iban: checkIbanStructure,
   aba_check: checkAbaRouting,
@@ -213,6 +259,8 @@ const VALIDATOR_DISPATCH: Record<string, ValidatorFn> = {
   ca_sin: checkCaSin,
   uk_nino: checkUkNino,
   es_id: checkEsId,
+  es_nuss: checkEsNuss,
+  es_ccc: checkEsCcc,
 };
 
 /**

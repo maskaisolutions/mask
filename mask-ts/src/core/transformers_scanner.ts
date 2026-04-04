@@ -129,6 +129,8 @@ export class LocalTransformersScanner extends BaseScanner {
         const val = text.slice(start, end);
 
         const entityType = this._mapEntityType(r.entity);
+        if (!this._supportedEntities.includes(entityType)) continue;
+
         let confidence = r.score || 0.7;
 
         if (aggressive || boostEntities.has(entityType.toLowerCase().replace(/_/g, " "))) {

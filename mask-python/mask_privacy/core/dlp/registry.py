@@ -217,7 +217,7 @@ class DLPPatternRegistry:
             (
                 "CREDIT_CARD_NUMBER",
                 r"(?<!\d)(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}(?!\d)",
-                frozenset({"card", "credit", "visa", "mastercard", "amex", "payment"}),
+                frozenset({"card", "credit", "visa", "mastercard", "amex", "payment", "tarjeta", "credito", "debito", "pago"}),
                 0.97,
                 SensitiveCategory.FINANCIAL,
                 "luhn",
@@ -225,7 +225,7 @@ class DLPPatternRegistry:
             (
                 "INTL_BANK_IBAN",
                 r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}[A-Z0-9]{0,16}\b",
-                frozenset({"iban", "swift", "sepa", "wire", "bank transfer"}),
+                frozenset({"iban", "swift", "sepa", "wire", "bank transfer", "cuenta", "banco", "transferencia"}),
                 0.96,
                 SensitiveCategory.FINANCIAL,
                 "iban",
@@ -263,6 +263,16 @@ class DLPPatternRegistry:
                 "luhn_soft",
             ),
             (
+                "ES_CCC",
+                r"\b\d{4}[-\s]?\d{4}[-\s]?\d{2}[-\s]?\d{10}\b",
+                frozenset({"cuenta", "ccc", "banco", "sucursal", "entidad", "codigo cuenta cliente"}),
+                0.90,
+                SensitiveCategory.FINANCIAL,
+                "es_ccc",
+                True,
+                ["*", "es"],
+            ),
+            (
                 "SWIFT_BIC",
                 r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b",
                 frozenset({"swift", "bic", "bank code", "transfer"}),
@@ -275,16 +285,16 @@ class DLPPatternRegistry:
             (
                 "EMAIL_ADDR",
                 r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
-                frozenset({"email", "mail", "contact", "address"}),
+                frozenset({"email", "mail", "contact", "address", "correo", "electronico"}),
                 0.99,
                 SensitiveCategory.CONTACT,
                 None,
             ),
             (
                 "PHONE_NUM",
-                r"(?<!\d)(?:\+?[1-9]\d{0,3}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}(?!\d)",
-                frozenset({"phone", "call", "mobile", "tel", "whatsapp", "number"}),
-                0.80,  # Lowered from 0.92 to allow Fuzzy ID (0.85) to win overlaps
+                r"(?<!\d)(?:\+?[1-9]\d{0,3}[-.\s]?)?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}(?!\d)",
+                frozenset({"phone", "call", "mobile", "tel", "whatsapp", "number", "teléfono", "telefono", "movil", "celular", "llamada"}),
+                0.80,
                 SensitiveCategory.CONTACT,
                 None,
             ),
@@ -324,8 +334,8 @@ class DLPPatternRegistry:
             # ── PERSONAL ──────────────────────────────────────────────────
             (
                 "BIRTH_DATE",
-                r"\b(?:0[1-9]|1[0-2])[/-](?:0[1-9]|[12]\d|3[01])[/-](?:19|20)\d{2}\b",
-                frozenset({"birth", "dob", "born", "birthday", "date of birth"}),
+                r"\b(?:(?:0[1-9]|1[0-2])[/-](?:0[1-9]|[12]\d|3[01])[/-](?:19|20)\d{2}|(?:19|20)\d{2}[/-](?:0[1-9]|1[0-2])[/-](?:0[1-9]|[12]\d|3[01]))\b",
+                frozenset({"birth", "dob", "born", "birthday", "date of birth", "nacimiento", "fecha", "cumpleaños"}),
                 0.88,
                 SensitiveCategory.PERSONAL,
                 None,
@@ -433,6 +443,16 @@ class DLPPatternRegistry:
                 0.94,
                 SensitiveCategory.IDENTITY_INTL,
                 "es_id",
+                True,
+                ["*", "es"],
+            ),
+            (
+                "ES_NUSS",
+                r"\b\d{2}[-\s]?\d{8}[-\s]?\d{2}\b",
+                frozenset({"seguridad social", "nuss", "naf", "afiliacion"}),
+                0.90,
+                SensitiveCategory.IDENTITY_INTL,
+                "es_nuss",
                 True,
                 ["*", "es"],
             ),

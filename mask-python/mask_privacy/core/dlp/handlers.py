@@ -241,10 +241,62 @@ def check_es_id(raw: str) -> bool:
     return cleaned[8] == valid_letters[num % 23]
 
 
+# ── Spanish Social Security (NUSS) ──────────────────────────────────────────
+
+def check_es_nuss(raw: str) -> bool:
+    """Validate Spanish Social Security Number (NUSS/NAF).
+    
+    Format: PP NNNNNNNN CC (12 digits)
+    Check: (Province + Number) % 97 == Control
+    """
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) != 12:
+        return False
+    
+    a = int(digits[:2])   # Province
+    b = int(digits[2:10]) # Number
+    c = int(digits[10:])  # Control
+    
+    if b < 10000000:
+        check = (a * 10000000 + b) % 97
+    else:
+        check = int(digits[:10]) % 97
+        
+    return check == c
+
+
+# ── Spanish Bank Account (CCC) ──────────────────────────────────────────────
+
+def check_es_ccc(raw: str) -> bool:
+    """Validate Spanish Bank Account (Código Cuenta Cliente).
+    
+    Format: BBBB SSSS DD NNNNNNNNNN (20 digits)
+    Uses two Mod-11 weighted checksums for control digits.
+    """
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) != 20:
+        return False
+        
+    weights = [1, 2, 4, 8, 5, 10, 9, 7, 3, 6]
+    
+    def calc_digit(block):
+        s = sum(int(b) * w for b, w in zip(block, weights))
+        rem = 11 - (s % 11)
+        if rem == 10: return 1
+        if rem == 11: return 0
+        return rem
+        
+    d1 = calc_digit("00" + digits[:8])
+    d2 = calc_digit(digits[10:])
+    
+    return int(digits[8]) == d1 and int(digits[9]) == d2
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────────
 
 _VALIDATOR_DISPATCH = {
     "luhn":       check_luhn,
+    "luhn_soft":  check_luhn,
     "ssn_area":   check_ssn_area,
     "iban":       check_iban_structure,
     "aba_check":  check_aba_routing,
@@ -254,6 +306,8 @@ _VALIDATOR_DISPATCH = {
     "ca_sin":     check_ca_sin,
     "uk_nino":    check_uk_nino,
     "es_id":      check_es_id,
+    "es_nuss":    check_es_nuss,
+    "es_ccc":     check_es_ccc,
 }
 
 
