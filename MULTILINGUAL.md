@@ -15,21 +15,18 @@ All other languages are not supported. Passing unsupported language codes will c
 
 ## How It Works: The Waterfall
 
-PII detection runs in three tiers, each optimized for EN/ES text.
+PII detection runs in two major tiers, each optimized for EN/ES text.
 
-### Tier 0: DLP Heuristic (Fastest)
-The DLP engine scans for structural PII using locale-aware regex patterns and checksum validators.
-- **Supported identity types:** US SSN, US EIN, US Passport, Spanish DNI/NIE, Credit Cards, IBAN, Crypto addresses, IBANs, and more.
-- **Name patterns:** Honors English honorifics (Mr, Mrs, Dr, Prof) and Spanish honorifics (Sr, Sra, Srta).
-- **Address patterns:** Matches US street addresses and Spanish street naming conventions (Calle, Avenida, Paseo, etc.).
-- **Latency:** < 5ms.
+### Tier 0: Deterministic (Hardened Registry)
+The core DLP engine scans for structural PII using locale-aware regex patterns and checksum validators (Luhn, Mod-97, Mod-11).
+- **Global Standards:** Emails, URLs, IP Addresses, Credit Cards, IBANs, Crypto addresses.
+- **US Specific:** SSN, EIN, Passport, ABA Routing.
+- **Spanish Specific:** DNI/NIE, **NUSS** (Social Security), **CCC** (Bank Account), Spanish Phone numbers.
+- **Proximity Boosting:** Uses context keywords (e.g., *cuenta*, *seguridad social*, *nuss*) to escalate detection confidence.
+- **Latency:** < 2ms (avg).
 
-### Tier 1: Deterministic (Global Standards)
-Handles globally standardized formats like Emails, URLs, IP Addresses, and Credit Cards. These patterns are language-agnostic.
-- **Latency:** < 2ms.
-
-### Tier 2: Probabilistic NLP (Deep Context)
-Uses Named Entity Recognition (NER) to catch context-dependent PII like Names, Organizations, and Locations.
+### Tier 1: Probabilistic NLP (Deep Context)
+Uses Named Entity Recognition (NER) to catch unstructured PII. To ensure reliability and prevent collisions with structured IDs, this tier is standardized to three core entities: **PERSON**, **LOCATION**, and **ORGANIZATION**.
 
 **Python SDK:**
 - Uses **Presidio + spaCy** with dedicated EN/ES models:

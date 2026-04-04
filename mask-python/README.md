@@ -104,27 +104,18 @@ Mask includes the ability to detokenize PII embedded within larger text blocks (
 - **Probabilistic Vault Cleanup**: `MemoryVault` uses a probabilistic $O(1)$ cleanup strategy to avoid $O(N)$ blocking scans. Frequency is configurable via `MASK_VAULT_CLEANUP_FREQUENCY`.
 - **Thread-Safe Singletons**: Core accessors for `Vault`, `KeyProvider`, and `Scanner` are thread-safe and lazily initialized, preventing race conditions during high-concurrency app startup.
 
-## Language-Specific PII Detection (Waterfall Pipeline)
+## Language-Specific PII Detection (2-Tier Waterfall)
 
 Mask provides high-precision PII detection for **English (en)** and **Spanish (es)**.
 
-### Supported Language Matrix
-
-Mask provides first-class support for the following languages:
-
-| Language | Code | Tier 0 (DLP) | Tier 2 (NLP Engine) |
-| :--- | :--- | :--- | :--- |
-| **English** | `en` | ✅ Full | spaCy (`en_core_web_sm`) |
-| **Spanish** | `es` | ✅ Full | spaCy (`es_core_news_sm`) |
-
 ### How the Waterfall Works: The Excising Mechanism
 
-To maintain high performance, the Python SDK does not simply run three separate scans. It uses a **Sequential Mutation** strategy:
+To maintain high performance, the Python SDK does not simply run multiple separate scans. It uses a **Sequential Mutation** strategy:
 
-1.  **Tier 0 & 1 (The Scouts):** The SDK first runs the high-speed DLP and Regex engines.
-2.  **Immediate Tokenization:** Any PII found by these tiers is **immediately replaced** by a token in the string buffer.
-3.  **Tier 2 (The Heavy Infantry):** The expensive NLP engine (spaCy/Transformers) only scans the *remaining* text. Because the PII has already been "excised" (cut out and replaced with tokens), the NLP engine doesn't waste compute on data already identified.
-4.  **Bypass Logic:** All tiers are "token-aware." If a scan encounter a string that is already a Mask token, it skips it entirely, preventing redundant processing or "double-tokenization."
+1.  **Tier 0: Deterministic (The Registry):** The SDK first runs the high-speed DLP and Registry engines. These use regex + checksums (Luhn, Mod-97, Mod-11) + Proximity Keywords to identify structured PII (SSN, IBAN, DNI, NUSS, etc.) with 100% precision.
+2.  **Immediate Tokenization:** Any PII found by Tier 0 is **immediately replaced** by a token in the string buffer.
+3.  **Tier 1: Probabilistic (Neural NER):** The expensive NLP engine (spaCy) only scans the *remaining* text for unstructured entities: **PERSON**, **LOCATION**, and **ORGANIZATION**. Because Tier 0 PII has already been "excised", the NLP engine doesn't waste compute on data already identified, and entity collisions are avoided.
+4.  **Bypass Logic:** All tiers are "token-aware." If a scan encounters a string that is already a Mask token, it skips it entirely.
 
 ---
 

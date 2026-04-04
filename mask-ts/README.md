@@ -127,27 +127,18 @@ Performance-sensitive deployments utilize the built-in `LocalTransformersScanner
 ### 7. Sub-string Detokenization
 Mask includes the ability to detokenize PII embedded within larger text blocks (like email bodies or chat messages). `detokenizeText()` uses high-performance regex to find and restore all tokens within a paragraph before they hit your tools.
 
-## Multilingual PII Detection (Waterfall Pipeline)
+## Multilingual PII Detection (2-Tier Waterfall)
 
-Mask is built for the global enterprise. The TypeScript SDK implements a **3-Tier Waterfall Detection** strategy for high-precision PII detection in **English and Spanish** using local ONNX models.
-
-### Supported Language Matrix
-
-Mask provides first-class support for the following languages:
-
-| Language | Code | Tier 0 (DLP) | Tier 2 (NLP Engine) |
-| :--- | :--- | :--- | :--- |
-| **English** | `en` | ✅ Full | DistilBERT (Simple) |
-| **Spanish** | `es` | ✅ Full | BERT Multilingual |
+Mask is built for the global enterprise. The TypeScript SDK implements a **2-Tier Model-Augmented Waterfall** strategy for high-precision PII detection in **English and Spanish**.
 
 ### How the Waterfall Works: The Excising Mechanism
 
-To maintain high performance, the TypeScript SDK does not simply run three separate scans. It uses a **Sequential Mutation** strategy:
+To maintain high performance, the TypeScript SDK does not simply run multiple separate scans. It uses a **Sequential Mutation** strategy:
 
-1.  **Tier 0 & 1 (The Scouts):** The SDK first runs the high-speed DLP and Regex engines synchronously in the main thread.
-2.  **Immediate Tokenization:** Any PII found by these tiers is **immediately replaced** by a token in the string buffer.
-3.  **Tier 2 (The Heavy Infantry):** The expensive NLP engine (Transformers.js) only scans the *remaining* text. Because the PII has already been "excised" (cut out and replaced with tokens), the NLP engine doesn't waste compute on data already identified.
-4.  **Bypass Logic:** All tiers are "token-aware." If a scan encounter a string that is already a Mask token, it skips it entirely, preventing redundant processing or "double-tokenization."
+1.  **Tier 0: Deterministic (The Registry):** The SDK first runs the high-speed DLP and Registry engines. These use regex + checksums (Luhn, Mod-97, Mod-11) + Proximity Keywords to identify structured PII (Bank Accounts, SSNs, DNI, NUSS, etc.) with 100% precision.
+2.  **Immediate Tokenization:** Any PII found by Tier 0 is **immediately replaced** by a token in the string buffer.
+3.  **Tier 1: Probabilistic (Neural NER):** The expensive NLP engine (Transformers.js) only scans the *remaining* text for unstructured entities: **PERSON**, **LOCATION**, and **ORGANIZATION**. Because Tier 0 PII has already been "excised", the NLP engine doesn't waste compute on data already identified, and entity collisions are avoided.
+4.  **Bypass Logic:** All tiers are "token-aware." If a scan encounters a string that is already a Mask token, it skips it entirely.
 
 ---
 

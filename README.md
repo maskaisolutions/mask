@@ -24,17 +24,16 @@ Mask provides a **Local-First, Just-In-Time (JIT) Encryption** middleware:
 
 ---
 
-## 3-Tier Waterfall Detection
+## 2-Tier Model-Augmented Waterfall
 
-Mask uses a **Sequential Mutation** strategy for speed and accuracy:
+Mask uses a **Sequential Mutation** strategy to maximize precision and minimize neural hallucinations:
 
 | Tier | Method | Speed | Description |
 |------|--------|-------|-------------|
-| **0 — DLP Heuristic** | Regex + Checksum + Proximity | ⚡ Fastest | Validates structured IDs (Luhn, IBAN, DNI) with context-aware scoring. |
-| **1 — Deterministic** | Format-specific regex | ⚡ Fast | Legacy email, phone, SSN, CC patterns. |
-| **2 — Probabilistic** | Transformer models (NLP) | 🐢 Slow | Catches unstructured names and organizations. |
+| **0 — Deterministic** | Registry + Checksums + Context | ⚡ Fastest | High-precision matches for IDs (SSN, DNI), Financials (IBAN, CC), and Contact info. |
+| **1 — Probabilistic** | Transformer Models (NER) | 🐢 Slow | Standardized fuzzy detection for **PERSON**, **LOCATION**, and **ORGANIZATION**. |
 
-Already-tokenized data is skipped by downstream tiers to prevent redundant processing.
+Already-tokenized data is skipped by the neural tier to prevent entity collisions.
 
 ## Language Support
 
@@ -43,10 +42,10 @@ High-performance PII detection for **English (en)** and **Spanish (es)**.
 
 ## Supported Data Types
 
-Mask handles **28+ core PII types** across categories including:
-- **Financial:** SSN, Credit Cards, IBAN, ABA Routing, Bitcoin/ETH.
+Mask handles **50+ core PII types** across categories including:
+- **Financial:** SSN, Credit Cards, IBAN, ABA Routing, Bitcoin/ETH, Spanish CCC/IBAN.
 - **Contact:** Email, Phone (Intl), IPv4/v6, MAC Address.
-- **Identity:** Passport, EIN/Tax ID, Spanish DNI/NIE, Canadian SIN, UK NINO.
+- **Identity:** Passport, EIN/Tax ID, Spanish DNI/NIE, ES NUSS, Canadian SIN, UK NINO.
 - **Healthcare/Vehicle:** Medical IDs, DEA, VIN, License Plates.
 
 ---
