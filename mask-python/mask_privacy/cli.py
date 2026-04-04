@@ -23,27 +23,20 @@ def cache_models(languages: List[str], engine: str, cache_dir: str):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir, exist_ok=True)
 
-    if engine == "presidio" or engine == "spacy":
+    if engine == "spacy":
         try:
             import spacy
             for lang in languages:
-                # Map language to standard spaCy model names
                 model_map = {
                     "en": "en_core_web_sm",
                     "es": "es_core_news_sm",
-                    "fr": "fr_core_news_sm",
-                    "de": "de_core_news_sm",
-                    "zh": "zh_core_web_sm",
-                    "ja": "ja_core_news_sm",
-                    "tr": "tr_core_news_trf",
-                    "ar": "en_core_web_sm", # Arabic uses transformers engine, but spaCy needs a placeholder
                 }
                 model_name = model_map.get(lang)
                 if model_name:
                     logger.info(f"Downloading spaCy model: {model_name}")
                     spacy.cli.download(model_name)
                 else:
-                    logger.warning(f"No default spaCy model mapping for language: {lang}")
+                    logger.warning(f"Unsupported language for spaCy: {lang}. Supported: en, es")
         except ImportError:
             logger.error("spaCy not installed. Run 'pip install mask-privacy[spacy]'")
             sys.exit(1)
@@ -53,7 +46,7 @@ def cache_models(languages: List[str], engine: str, cache_dir: str):
             from transformers import AutoTokenizer, AutoModelForTokenClassification
             
             # Determine which model to cache based on language
-            needs_multilingual = any(l != "en" for l in languages)
+            needs_multilingual = any(l == "es" for l in languages)
             model_name = "Xenova/bert-base-multilingual-cased-ner-hrl" if needs_multilingual else "Xenova/distilbert-base-uncased-ner-simple"
             
             # Override if MASK_NLP_MODEL is set
@@ -69,7 +62,7 @@ def cache_models(languages: List[str], engine: str, cache_dir: str):
             sys.exit(1)
     
     else:
-        logger.error(f"Unknown engine: {engine}. Supported: 'presidio', 'transformers'")
+        logger.error(f"Unknown engine: {engine}. Supported: 'spacy', 'transformers'")
         sys.exit(1)
 
 def main():
@@ -88,7 +81,7 @@ def main():
         "--engine", 
         type=str, 
         default=config.MASK_NLP_ENGINE,
-        help="NLP engine to cache models for (presidio, transformers)"
+        help="NLP engine to cache models for (spacy, transformers)"
     )
     cache_parser.add_argument(
         "--cache-dir", 

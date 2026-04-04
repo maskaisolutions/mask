@@ -48,28 +48,6 @@ export const LOCALE_NAME_RULES: Record<string, RegExp[]> = {
     /\b[A-Z][a-záéíóúñ\-\']+ [A-Z][a-záéíóúñ\-\']+(?:\s+[A-Z][a-záéíóúñ\-\']+)?\b/g,
     /\b(?:Sr|Sra|Srta)\.?\s+[A-Z][a-záéíóúñ\-\']+\b/g,
   ],
-  fr: [
-    /\b[A-Z][a-zàâçéèêëïîôùûü\-\']+ [A-Z][a-zàâçéèêëïîôùûü\-\']+\b/g,
-    /\b(?:M|Mme|Mlle)\.?\s+[A-Z][a-zàâçéèêëïîôùûü\-\+\']+\b/g,
-  ],
-  de: [
-    /\b[A-Z][a-zäöüß\-\']+ [A-Z][a-zäöüß\-\']+\b/g,
-    /\b(?:Herr|Frau)\.?\s+[A-Z][a-zäöüß\-\']+\b/g,
-  ],
-  tr: [
-    /\b[A-ZÇĞİÖŞÜ][a-zçğıöşü]+ [A-ZÇĞİÖŞÜ][a-zçğıöşü]+\b/g,
-    /\b(?:Bay|Bayan|Sayın)\.?\s+[A-ZÇĞİÖŞÜ][a-zçğıöşü]+\b/g,
-  ],
-  ar: [
-    /[\u0621-\u064a][\u0600-\u06ff]+ [\u0621-\u064a][\u0600-\u06ff]+/g,
-    /(?:أبو|أم|ابن|بنت)\s+[\u0621-\u064a][\u0600-\u06ff]+/gi,
-  ],
-  ja: [
-    /\b[A-Z][a-z]+(?:moto|yama|kawa|mura|ta|da|shi|no)\s+[A-Z][a-z]+\b/g,
-  ],
-  zh: [
-    /\b[A-Z][a-z]{1,3}\s+[A-Z][a-z]+\b/g,
-  ],
 };
 
 export const LOCALE_ADDRESS_RULES: Record<string, RegExp[]> = {
@@ -77,26 +55,8 @@ export const LOCALE_ADDRESS_RULES: Record<string, RegExp[]> = {
     /\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way)\b/g,
     /\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/g,
   ],
-  fr: [
-    /\b\d{1,4}\s+(?:rue|avenue|boulevard|place|chemin)\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ]+\b/gi,
-  ],
-  de: [
-    /\b[A-ZÄÖÜa-zäöüß]+(?:straße|strasse|weg|gasse|platz)\s+\d{1,4}\b/g,
-  ],
-  tr: [
-    /\b[A-ZÇĞİÖŞÜa-zçğıöşü]+\s+(?:Cad|Sok|Mah)\.?\s+/gi,
-    /\b\d{5}\s+[A-ZÇĞİÖŞÜa-zçğıöşü]+\/[A-ZÇĞİÖŞÜa-zçğıöşü]+\b/g,
-  ],
-  ar: [
-    /شارع\s+[\u0600-\u06ff]+/g,
-    /حي\s+[\u0600-\u06ff]+/g,
-    /(?:ص\.ب|P\.?O\.?\s*Box)\s*\d{3,6}/gi,
-  ],
-  uk_postcode: [
-    /\b[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}\b/g,
-  ],
-  ca_postal: [
-    /\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b/g,
+  es: [
+    /\b(?:Calle|Carrera|Avenida|Paseo|Plaza)\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ]+\b/gi,
   ],
 };
 
@@ -199,32 +159,8 @@ const RAW_PATTERNS: RawEntry[] = [
   ["CA_SOCIAL_INS", "\\b\\d{3}[-\\s]?\\d{3}[-\\s]?\\d{3}\\b",
     ["sin", "social insurance", "canada", "canadian"], 0.89, SensitiveCategory.IDENTITY_INTL, "ca_sin"],
 
-  ["FR_INSEE_NUM", "\\b[12]\\d{2}[01]\\d\\d{8}\\d{2}\\b",
-    ["insee", "sécurité sociale", "france", "numéro"], 0.88, SensitiveCategory.IDENTITY_INTL, "fr_insee"],
-
-  ["DE_STEUER_ID", "\\b\\d{2}\\s?\\d{3}\\s?\\d{3}\\s?\\d{3}\\b",
-    ["steuer", "steuernummer", "finanzamt", "deutschland"], 0.87, SensitiveCategory.IDENTITY_INTL, null],
-
-  ["TR_TCID", "\\b[1-9]\\d{9}[02468]\\b",
-    ["tc", "kimlik", "vatandaşlık", "nüfus", "türkiye"], 0.92, SensitiveCategory.IDENTITY_INTL, "tcid"],
-
-  ["SA_NATIONAL_ID", "\\b1\\d{9}\\b",
-    ["هوية", "رقم الهوية", "saudi", "وطنية", "identity"], 0.91, SensitiveCategory.IDENTITY_INTL, "saudi_nid"],
-
-  ["UAE_EMIRATES_ID", "784-\\d{4}-\\d{7}-\\d",
-    ["emirates", "هوية", "uae", "emirati", "identity"], 0.93, SensitiveCategory.IDENTITY_INTL, "luhn", true, ["*", "ar"]],
-
-  ["CN_ID", "[1-9]\\d{5}(?:18|19|20)\\d{2}(?:0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])\\d{3}[0-9Xx]",
-    ["身份证", "身份号码", "id card", "china"], 0.95, SensitiveCategory.IDENTITY_INTL, "cn_id", true, ["*", "zh"]],
-
-  ["JA_MY_NUMBER", "\\d{12}",
-    ["マイナンバー", "個人番号", "my number", "japan"], 0.94, SensitiveCategory.IDENTITY_INTL, "ja_id", true, ["*", "ja"]],
-
   ["ES_DNI", "(?:\\d{8}[A-Z]|[XYZ]\\d{7}[A-Z])",
     ["dni", "nie", "identidad", "nif", "spain"], 0.94, SensitiveCategory.IDENTITY_INTL, "es_id", true, ["*", "es"]],
-
-  ["INTL_PASSPORT", "[A-Z0-9]{6,12}",
-    ["passport", "travel", "immigration", "visa"], 0.60, SensitiveCategory.IDENTITY_INTL, null, true, ["*"]],
 
   // ── CORPORATE ──────────────────────────────────────────────────────
   ["CORP_EMPLOYEE_ID", "(?:EMP|EMPLOYEE|ID)[:\\s]?[A-Z0-9]{5,10}",
@@ -242,7 +178,7 @@ export class DLPPatternRegistry {
 
   constructor(loadGroups?: ReadonlySet<SensitiveCategory>) {
     this.buildCatalogue(loadGroups ?? null);
-    for (const loc of ["*", "en", "es", "fr", "de", "tr", "ar", "ja", "zh"]) {
+    for (const loc of ["*", "en", "es"]) {
       this.compileForLocale(loc);
     }
   }

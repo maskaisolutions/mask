@@ -4,17 +4,11 @@ Language Context Resolver — Unicode-block heuristic for multilingual DLP.
 Examines the character distribution of an input buffer to infer the
 dominant script / language.  The resolved language tag is consumed by
 the ``DLPPatternRegistry`` to prioritise locale-specific regex groups
-(e.g. Turkish honorifics, Arabic address keywords).
+(e.g. Spanish addresses/honorifics).
 
 Supported language tags:
   en — English (default / Latin-only fallback)
   es — Spanish
-  fr — French
-  de — German
-  tr — Turkish
-  ar — Arabic
-  zh — Chinese (Simplified / Traditional)
-  ja — Japanese
 """
 
 from __future__ import annotations
@@ -32,25 +26,8 @@ _log = logging.getLogger("mask.dlp.assessor")
 # before generic accented-Latin for French).
 
 _SCRIPT_SIGNATURES: Dict[str, re.Pattern] = {
-    # CJK / East-Asian — checked first because they are unambiguous
-    "zh": re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]"),
-    "ja": re.compile(r"[\u3040-\u309f\u30a0-\u30ff\u31f0-\u31ff]"),
-
-    # Arabic script — covers Standard Arabic, Urdu overlap, etc.
-    "ar": re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]"),
-
-    # Turkish — distinguished by dotless-i (ı), soft-g (ğ), ş, and cedilla ç
-    # We look for specifically Turkish letters that do NOT appear in French/German.
-    "tr": re.compile(r"[ğıİşŞ]"),
-
-    # German — umlauts and Eszett
-    "de": re.compile(r"[äöüÄÖÜß]"),
-
     # Spanish — ñ and inverted punctuation
     "es": re.compile(r"[ñÑ¡¿]"),
-
-    # French — cedilla, accented vowels with circumflex / diaeresis
-    "fr": re.compile(r"[àâçéèêëïîôùûüÿœæ]", re.IGNORECASE),
 }
 
 
@@ -63,8 +40,8 @@ class LanguageContextResolver:
     Usage::
 
         resolver = LanguageContextResolver()
-        tag = resolver.resolve("Merhaba, TC Kimlik Numaram 12345678901")
-        # tag == "tr"
+        tag = resolver.resolve("Hola, mi DNI es 12345678Z")
+        # tag == "es"
     """
 
     # Minimum number of script-specific characters required before we

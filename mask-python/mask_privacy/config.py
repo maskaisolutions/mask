@@ -4,7 +4,7 @@ Centralizes all environment-based settings with detailed documentation.
 """
 
 import os
-from typing import List, Optional
+from typing import Optional
 
 def get_env_bool(name: str, default: bool = False) -> bool:
     """Helper to parse boolean environment variables."""

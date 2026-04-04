@@ -67,7 +67,7 @@ Mask implements a **3-tier Waterfall Detection Pipeline** that maximises speed a
 
 | Tier | Method | Speed | Description |
 |------|--------|-------|-------------|
-| **0 — DLP Heuristic** | Regex + Checksum + Proximity Scoring | ⚡ Fastest | 28 structured patterns with hard-validation (Luhn, IBAN Mod-97, Turkish TCID, Saudi NID) and proximity-weighted confidence boosting. |
+| **0 — DLP Heuristic** | Regex + Checksum + Proximity Scoring | ⚡ Fastest | Structured patterns with hard-validation (Luhn, IBAN Mod-97, Spanish DNI) and proximity-weighted confidence boosting. |
 | **1 — Deterministic Regex** | Format-specific regex | ⚡ Fast | Legacy email, phone, SSN, CC patterns with ABA/Luhn checksums. |
 | **2 — Probabilistic NLP** | Transformer models (spaCy / HuggingFace) | 🐢 Slow | Catches unstructured entities (names, organisations) that regex cannot identify. |
 
@@ -80,30 +80,24 @@ To maintain high performance, Mask does not simply run three separate scans. It 
 3.  **Tier 2 (The Heavy Infantry):** The expensive NLP engine (Transformer/spaCy) only scans the *remaining* text. Because the PII has already been "excised" (cut out and replaced with tokens), the NLP engine doesn't waste compute on data that has already been accurately identified.
 4.  **Bypass Logic:** All tiers are "token-aware." If a scan encounters a string that is already a Mask token, it skips it entirely, preventing redundant processing or "double-tokenization."
 
-### Multilingual Support
+### Language Support
 
-Mask provides high-performance PII detection across **8 major languages** (EN, ES, FR, DE, TR, AR, JA, ZH). 
+Mask provides high-performance PII detection for **English (en)** and **Spanish (es)**.
 
-Our 3-tier waterfall pipeline is designed to be language-aware, using a combination of locale-specific regex patterns and optimized NLP models.
+Our 3-tier waterfall pipeline is language-aware, using locale-specific regex patterns and optimized NLP models.
 
-[**Read the Multilingual Support Guide**](MULTILINGUAL.md) for detailed technical nuances, model setup, and latency benchmarks.
+[**Read the Language Support Guide**](MULTILINGUAL.md) for detailed technical nuances, model setup, and latency benchmarks.
 
 ---
 
-### Multilingual Detection
+### Language Detection
 
-The DLP pipeline includes a **Language Context Resolver** that uses Unicode-block heuristics to detect 8 languages before selecting locale-specific patterns:
+The DLP pipeline includes a **Language Context Resolver** that uses Unicode-block heuristics to select locale-specific patterns:
 
 | Language | Detection Method | Locale-Specific Patterns |
 |----------|-----------------|-------------------------|
 | English (default) | Latin-only fallback | Standard US/UK PII |
-| Turkish | `ğ`, `ı`, `İ`, `ş`, `Ş` | T.C. Kimlik No, Turkish addresses (Cad/Sok/Mah), Turkish honorifics (Bay/Bayan/Sayın) |
-| Arabic | `\u0600-\u06FF` | Saudi National ID, UAE Emirates ID, Arabic addresses (شارع/حي), Arabic names |
-| Spanish | `ñ`, `¡`, `¿` | Spanish honorifics (Sr/Sra/Srta) |
-| French | `à`, `â`, `ç`, `é`, `è` | French addresses (rue/avenue/boulevard), INSEE number |
-| German | `ä`, `ö`, `ü`, `ß` | Steuer-ID, German addresses (straße/weg/platz) |
-| Chinese | CJK Unified Ideographs | Romanized Pinyin names |
-| Japanese | Hiragana / Katakana | Romanized surname detection |
+| Spanish | `ñ`, `¡`, `¿` | Spanish honorifics (Sr/Sra/Srta), Spanish addresses (Calle/Avenida/Paseo) |
 
 
 ### Proximity-Weighted Confidence Scoring
@@ -124,7 +118,7 @@ Where `distance` is the character offset between match and each context keyword.
 | **Contact** | Email, Phone (US/Intl incl. TR/SA/UAE), IPv4, IPv6, MAC Address |
 | **Personal** | Date of Birth, US Driver's License, US Passport |
 | **Identity (US)** | EIN/Tax ID |
-| **Identity (Intl)** | UK NINO, Canadian SIN, French INSEE, German Steuer-ID, Turkish T.C. Kimlik, Saudi National ID, UAE Emirates ID |
+| **Identity (Intl)** | UK NINO, Canadian SIN, Spanish DNI/NIE |
 | **Vehicle** | VIN (with check-digit validation), License Plate |
 | **Healthcare** | Medical Record ID, Medicare ID, DEA Number, NPI Number |
 | **Corporate** | Employee ID |
@@ -146,12 +140,6 @@ Mask prevents the misidentification of real data as tokens by using universally 
 * Credit Card tokens use the `4000-0000-0000` Visa reserved test BIN. 
 
 This prefix-based approach ensures that the SDK does not inadvertently process valid PII as an existing token.
-
-Additional collision-proof prefixes are used for international identifiers:
-* Turkish TCID tokens use the `990000` prefix (no valid Kimlik number starts with `99`).
-* Saudi NID tokens use the `100000` prefix (distinct from real `1XXXXXXXXX` sequences via length constraint).
-* UAE Emirates ID tokens use the `784-0000-` prefix (zeroed sub-fields are structurally invalid).
-* IBAN tokens zero the check digits (`XX00...`), which always fails ISO 7064 Mod-97 verification.
 
 ### 3. Pluggable Key Management (Enterprise KMS)
 Mask supports a pluggable `BaseKeyProvider` architecture across all SDK languages. This allows enterprises to fetch encryption keys dynamically from AWS KMS, Azure Key Vault, or HashiCorp Vault at runtime, rather than relying on static environment variables.

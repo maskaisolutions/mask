@@ -7,7 +7,7 @@ from mask_privacy.core.scanner import REGEX_PATTERNS, PresidioScanner
 
 
 class TestInternationalPhonePatterns:
-    """PHONE_NUMBER_INTL should match UK, French, and German phone numbers."""
+    """PHONE_NUMBER_INTL should match international phone numbers."""
 
     @pytest.mark.parametrize("number", [
         "+44 20 7946 0958",

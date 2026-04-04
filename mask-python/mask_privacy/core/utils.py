@@ -9,11 +9,6 @@ and Pydantic models.
 
 from typing import Any, List, Dict, Optional, Tuple, Union
 
-from mask_privacy.core.vault import _decode_lenient, detokenize_text
-from mask_privacy.core.fpe import looks_like_token
-from mask_privacy.core.scanner import get_scanner
-
-
 MAX_DEPTH = 100
 
 def deep_decode(obj: Any, client: Optional[Any] = None) -> Any:

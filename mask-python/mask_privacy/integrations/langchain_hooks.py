@@ -18,7 +18,7 @@ Usage (recommended):
 
 import logging
 import functools
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 from ..core.utils import deep_decode, deep_encode_pii
 
@@ -60,7 +60,7 @@ try:
             """
             if inputs is not None:
                 # Work on a copy for audit/logging — do NOT mutate the original
-                decoded_copy = deep_decode(dict(inputs), client=self._client)
+                _decoded = deep_decode(dict(inputs), client=self._client)
                 logger.info(
                     "[langchain pre-hook] decoded inputs for %s",
                     serialized.get("name"),

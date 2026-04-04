@@ -146,66 +146,6 @@ export function checkIpv4Octets(raw: string): boolean {
   return true;
 }
 
-// ── Turkish TCID (11-digit Kimlik No) ──────────────────────────────────────
-
-export function checkTcidNumber(raw: string): boolean {
-  const digitsStr = raw.replace(/\D/g, "");
-  if (digitsStr.length !== 11) return false;
-  const d = digitsStr.split("").map(Number);
-  if (d[0] === 0) return false;
-  if (d[10] % 2 !== 0) return false;
-
-  const oddSum = d[0] + d[2] + d[4] + d[6] + d[8];
-  const evenSum = d[1] + d[3] + d[5] + d[7];
-  const computedD10 = ((oddSum * 7 - evenSum) % 10 + 10) % 10;
-  if (computedD10 !== d[9]) return false;
-
-  const firstTenSum = d.slice(0, 10).reduce((a, b) => a + b, 0);
-  if (firstTenSum % 10 !== d[10]) return false;
-
-  return true;
-}
-
-// ── Saudi National ID (10-digit, starts with 1) ────────────────────────────
-
-export function checkSaudiNid(raw: string): boolean {
-  const digitsStr = raw.replace(/\D/g, "");
-  if (digitsStr.length !== 10) return false;
-  const d = digitsStr.split("").map(Number);
-  if (d[0] !== 1) return false;
-
-  let total = 0;
-  for (let idx = 0; idx < 10; idx++) {
-    let val = d[idx];
-    if (idx % 2 === 0) { // 0-indexed odd positions
-      val *= 2;
-      if (val > 9) val -= 9;
-    }
-    total += val;
-  }
-  return total % 10 === 0;
-}
-
-// ── French INSEE (Mod-97) ──────────────────────────────────────────────────
-
-export function checkFrInsee(raw: string): boolean {
-  let cleaned = raw.replace(/ /g, "").toUpperCase();
-  if (cleaned.length !== 15) return false;
-  
-  // Handle Corsica
-  cleaned = cleaned.replace(/2A/g, "19").replace(/2B/g, "18");
-  if (!/^\d+$/.test(cleaned)) return false;
-  
-  const baseNumberStr = cleaned.slice(0, 13);
-  const expectedKey = parseInt(cleaned.slice(13), 10);
-  
-  // Modulo 97 on a 13-digit string requires BigInt
-  const baseNumber = BigInt(baseNumberStr);
-  const calculatedKey = 97n - (baseNumber % 97n);
-  
-  return Number(calculatedKey) === expectedKey;
-}
-
 // ── Canadian SIN (Luhn-9) ──────────────────────────────────────────────────
 
 export function checkCaSin(raw: string): boolean {
@@ -232,39 +172,6 @@ export function checkUkNino(raw: string): boolean {
   const cleaned = raw.replace(/ /g, "").toUpperCase();
   if (cleaned.length !== 9) return false;
   return UK_NINO_REGEX.test(cleaned);
-}
-
-// ── Chinese ID (18-digit, ISO 7064:1983.MOD 11-2) ───────────────────────────
-
-export function checkCnId(raw: string): boolean {
-  const cleaned = raw.replace(/[^0-9X]/gi, "").toUpperCase();
-  if (cleaned.length !== 18) return false;
-
-  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
-  const checkDigits = "10X98765432";
-
-  let total = 0;
-  for (let i = 0; i < 17; i++) {
-    total += parseInt(cleaned[i], 10) * weights[i];
-  }
-  return cleaned[17] === checkDigits[total % 11];
-}
-
-// ── Japanese Individual Number (12-digit, Modulo 11) ────────────────────────
-
-export function checkJaId(raw: string): boolean {
-  const digitsStr = raw.replace(/\D/g, "");
-  if (digitsStr.length !== 12) return false;
-  const d = digitsStr.split("").map(Number);
-
-  const weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
-  let total = 0;
-  for (let i = 0; i < 11; i++) {
-    total += d[i] * weights[i];
-  }
-  const remainder = total % 11;
-  const expected = remainder <= 1 ? 0 : 11 - remainder;
-  return d[11] === expected;
 }
 
 // ── Spanish DNI/NIE (8 digits + 1 letter) ───────────────────────────────────
@@ -303,13 +210,8 @@ const VALIDATOR_DISPATCH: Record<string, ValidatorFn> = {
   vin_format: checkVinFormat,
   btc_format: checkBtcFormat,
   ipv4: checkIpv4Octets,
-  tcid: checkTcidNumber,
-  saudi_nid: checkSaudiNid,
-  fr_insee: checkFrInsee,
   ca_sin: checkCaSin,
   uk_nino: checkUkNino,
-  cn_id: checkCnId,
-  ja_id: checkJaId,
   es_id: checkEsId,
 };
 

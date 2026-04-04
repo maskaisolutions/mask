@@ -59,32 +59,6 @@ LOCALE_NAME_RULES: Dict[str, List[re.Pattern]] = {
         re.compile(r"\b[A-Z][a-záéíóúñ\-\']+ [A-Z][a-záéíóúñ\-\']+(?:\s+[A-Z][a-záéíóúñ\-\']+)?\b"),
         re.compile(r"\b(?:Sr|Sra|Srta)\.?\s+[A-Z][a-záéíóúñ\-\']+\b"),
     ],
-    "fr": [
-        re.compile(r"\b[A-Z][a-zàâçéèêëïîôùûü\-\']+ [A-Z][a-zàâçéèêëïîôùûü\-\']+\b"),
-        re.compile(r"\b(?:M|Mme|Mlle)\.?\s+[A-Z][a-zàâçéèêëïîôùûü\-\']+\b"),
-    ],
-    "de": [
-        re.compile(r"\b[A-Z][a-zäöüß\-\']+ [A-Z][a-zäöüß\-\']+\b"),
-        re.compile(r"\b(?:Herr|Frau)\.?\s+[A-Z][a-zäöüß\-\']+\b"),
-    ],
-    "tr": [
-        re.compile(r"\b[A-ZÇĞİÖŞÜ][a-zçğıöşü]+ [A-ZÇĞİÖŞÜ][a-zçğıöşü]+\b"),
-        re.compile(r"\b(?:Bay|Bayan|Sayın)\.?\s+[A-ZÇĞİÖŞÜ][a-zçğıöşü]+\b"),
-    ],
-    "ar": [
-        # Arabic script full names (two+ words separated by space)
-        re.compile(r"[\u0621-\u064a][\u0600-\u06ff]+ [\u0621-\u064a][\u0600-\u06ff]+"),
-        # Kunya / Nasab prefixes
-        re.compile(r"(?i)\b(?:أبو|أم|ابن|بنت)\s+[\u0621-\u064a][\u0600-\u06ff]+"),
-    ],
-    "ja": [
-        # Romanized Japanese with common surname suffixes
-        re.compile(r"\b[A-Z][a-z]+(?:moto|yama|kawa|mura|ta|da|shi|no)\s+[A-Z][a-z]+\b"),
-    ],
-    "zh": [
-        # Romanized Chinese (Pinyin) — short surname + given name
-        re.compile(r"\b[A-Z][a-z]{1,3}\s+[A-Z][a-z]+\b"),
-    ],
 }
 
 LOCALE_ADDRESS_RULES: Dict[str, List[re.Pattern]] = {
@@ -95,27 +69,8 @@ LOCALE_ADDRESS_RULES: Dict[str, List[re.Pattern]] = {
         ),
         re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\b"),
     ],
-    "fr": [
-        re.compile(r"\b\d{1,4}\s+(?:rue|avenue|boulevard|place|chemin)\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ]+\b", re.IGNORECASE),
-    ],
-    "de": [
-        re.compile(r"\b[A-ZÄÖÜa-zäöüß]+(?:straße|strasse|weg|gasse|platz)\s+\d{1,4}\b"),
-    ],
-    "tr": [
-        re.compile(r"\b[A-ZÇĞİÖŞÜa-zçğıöşü]+\s+(?:Cad|Sok|Mah)\.?\s+", re.IGNORECASE),
-        re.compile(r"\b\d{5}\s+[A-ZÇĞİÖŞÜa-zçğıöşü]+/[A-ZÇĞİÖŞÜa-zçğıöşü]+\b"),
-    ],
-    "ar": [
-        re.compile(r"شارع\s+[\u0600-\u06ff]+"),
-        re.compile(r"حي\s+[\u0600-\u06ff]+"),
-        # Saudi / UAE P.O. Box
-        re.compile(r"(?:ص\.ب|P\.?O\.?\s*Box)\s*\d{3,6}", re.IGNORECASE),
-    ],
-    "uk_postcode": [
-        re.compile(r"\b[A-Z]{1,2}\d{1,2}[A-Z]?\s*\d[A-Z]{2}\b"),
-    ],
-    "ca_postal": [
-        re.compile(r"\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b"),
+    "es": [
+        re.compile(r"\b(?:Calle|Carrera|Avenida|Paseo|Plaza)\s+[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ]+\b", re.IGNORECASE),
     ],
 }
 
@@ -145,7 +100,7 @@ class DLPPatternRegistry:
         self._locale_category_regexes: Dict[str, Dict[str, re.Pattern]] = {}
         self._locale_category_type_maps: Dict[str, Dict[str, List[str]]] = {}
         # We pre-compile only the "Global" and "Common" locales on start
-        for loc in ["*", "en", "es", "fr", "de", "tr", "ar", "ja", "zh"]:
+        for loc in ["*", "en", "es"]:
             self._compile_for_locale(loc)
         _log.info(
             "DLP registry loaded %d pattern(s) across %d locale(s)",
@@ -472,76 +427,6 @@ class DLPPatternRegistry:
                 "ca_sin",
             ),
             (
-                "FR_INSEE_NUM",
-                r"\b[12]\d{2}[01]\d\d{8}\d{2}\b",
-                frozenset({"insee", "sécurité sociale", "france", "numéro"}),
-                0.88,
-                SensitiveCategory.IDENTITY_INTL,
-                "fr_insee",
-                True, # is_high_entropy
-                ["*", "fr"],
-            ),
-            (
-                "DE_STEUER_ID",
-                r"\b\d{2}\s?\d{3}\s?\d{3}\s?\d{3}\b",
-                frozenset({"steuer", "steuernummer", "finanzamt", "deutschland"}),
-                0.87,
-                SensitiveCategory.IDENTITY_INTL,
-                None,
-                True,
-                ["*", "de"],
-            ),
-            (
-                "TR_TCID",
-                r"\b[1-9]\d{9}[02468]\b",
-                frozenset({"tc", "kimlik", "vatandaşlık", "nüfus", "türkiye"}),
-                0.92,
-                SensitiveCategory.IDENTITY_INTL,
-                "tcid",
-                True,
-                ["*", "tr"],
-            ),
-            (
-                "SA_NATIONAL_ID",
-                r"\b1\d{9}\b",
-                frozenset({"هوية", "رقم الهوية", "saudi", "وطنية", "identity"}),
-                0.91,
-                SensitiveCategory.IDENTITY_INTL,
-                "saudi_nid",
-                True,
-                ["*", "ar"],
-            ),
-            (
-                "UAE_EMIRATES_ID",
-                r"\b784-\d{4}-\d{7}-\d\b",
-                frozenset({"emirates", "هوية", "uae", "emirati", "identity"}),
-                0.93,
-                SensitiveCategory.IDENTITY_INTL,
-                "luhn",
-                True,
-                ["*", "ar"],
-            ),
-            (
-                "CN_ID",
-                r"\b[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]\b",
-                frozenset({"身份证", "身份号码", "id card", "china"}),
-                0.95,
-                SensitiveCategory.IDENTITY_INTL,
-                "cn_id",
-                True,
-                ["*", "zh"],
-            ),
-            (
-                "JA_MY_NUMBER",
-                r"\b\d{12}\b",
-                frozenset({"マイナンバー", "個人番号", "my number", "japan"}),
-                0.94,
-                SensitiveCategory.IDENTITY_INTL,
-                "ja_id",
-                True,
-                ["*", "ja"],
-            ),
-            (
                 "ES_DNI",
                 r"\b(?:\d{8}[A-Z]|[XYZ]\d{7}[A-Z])\b",
                 frozenset({"dni", "nie", "identidad", "nif", "spain"}),
@@ -550,16 +435,6 @@ class DLPPatternRegistry:
                 "es_id",
                 True,
                 ["*", "es"],
-            ),
-            (
-                "INTL_PASSPORT",
-                r"\b[A-Z0-9]{6,12}\b",
-                frozenset({"passport", "travel", "immigration", "visa"}),
-                0.60,
-                SensitiveCategory.IDENTITY_INTL,
-                None,
-                True,
-                ["*"],
             ),
 
             # ── CORPORATE ─────────────────────────────────────────────────

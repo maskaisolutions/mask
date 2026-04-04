@@ -8,40 +8,17 @@
  * Supported language tags:
  *   en — English (default / Latin-only fallback)
  *   es — Spanish
- *   fr — French
- *   de — German
- *   tr — Turkish
- *   ar — Arabic
- *   zh — Chinese
- *   ja — Japanese
  */
 
-export type LanguageTag =
-  | "en" | "es" | "fr" | "de" | "tr" | "ar" | "zh" | "ja";
+export type LanguageTag = "en" | "es";
 
 /**
  * Ordered array of script signatures — more specific blocks are checked first
  * to avoid misclassification (e.g. ş/ğ/ı for Turkish before generic accented-Latin).
  */
 const SCRIPT_SIGNATURES: ReadonlyArray<{ tag: LanguageTag; pattern: RegExp }> = [
-  // CJK / East-Asian — checked first because they are unambiguous
-  { tag: "zh", pattern: /[\u4e00-\u9fff\u3400-\u4dbf]/g },
-  { tag: "ja", pattern: /[\u3040-\u309f\u30a0-\u30ff\u31f0-\u31ff]/g },
-
-  // Arabic script — covers Standard Arabic, Urdu overlap, etc.
-  { tag: "ar", pattern: /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/g },
-
-  // Turkish — distinguished by dotless-i (ı), soft-g (ğ), ş, and cedilla ç
-  { tag: "tr", pattern: /[ğıİşŞ]/g },
-
-  // German — umlauts and Eszett
-  { tag: "de", pattern: /[äöüÄÖÜß]/g },
-
   // Spanish — ñ and inverted punctuation
   { tag: "es", pattern: /[ñÑ¡¿]/g },
-
-  // French — cedilla, accented vowels with circumflex / diaeresis
-  { tag: "fr", pattern: /[àâçéèêëïîôùûüÿœæ]/gi },
 ];
 
 export interface LanguageBreakdown {
@@ -57,8 +34,8 @@ export interface LanguageBreakdown {
  * @example
  * ```ts
  * const resolver = new LanguageContextResolver();
- * const tag = resolver.resolve("Merhaba, TC Kimlik Numaram 12345678901");
- * // tag === "tr"
+ * const tag = resolver.resolve("Hola, mi DNI es 12345678Z");
+ * // tag === "es"
  * ```
  */
 export class LanguageContextResolver {

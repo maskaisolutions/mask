@@ -2,17 +2,16 @@
 Vault abstraction layer for Mask Privacy SDK.
 """
 
-import os
 import time
 import hmac
 import hashlib
 import logging
 import threading
-from typing import Dict, Any, Optional, List, Union, Literal
+from typing import Dict, Any, Optional, List
 
 from mask_privacy.core.fpe import looks_like_token, generate_fpe_token
 from mask_privacy.core.crypto import get_crypto_engine
-from mask_privacy.core.exceptions import MaskVaultConnectionError, MaskDecryptionError
+from mask_privacy.core.exceptions import MaskVaultConnectionError
 from mask_privacy.telemetry.audit_logger import get_audit_logger
 from mask_privacy.core.search import BucketManager
 from mask_privacy import config

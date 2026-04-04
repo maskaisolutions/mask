@@ -45,8 +45,8 @@ export interface ScoreInput {
  *   baseRisk: 0.92,
  *   matchStart: 10,
  *   matchEnd: 21,
- *   fullText: "TC Kimlik No: 10000000146",
- *   proximityTerms: new Set(["kimlik", "tc"]),
+ *   fullText: "Mi número de DNI es 12345678Z",
+ *   proximityTerms: new Set(["dni", "número"]),
  *   validatorPassed: true,
  * });
  * // score === 0.99 (validator override)

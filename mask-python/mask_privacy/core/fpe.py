@@ -81,13 +81,9 @@ _CC_RE    = re.compile(r"^(?:\d{4}[ \-]?){3}\d{4}$")
 _ROUTING_RE = re.compile(r"^\d{9}$")
 
 # International ID format detectors
-_TCID_RE = re.compile(r"^[1-9]\d{9}[02468]$")           # Turkish TC Kimlik
-_SAUDI_NID_RE = re.compile(r"^1\d{9}$")                  # Saudi National ID
-_UAE_EID_RE = re.compile(r"^784-\d{4}-\d{7}-\d$")        # UAE Emirates ID
-_IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{4,30}$") # IBAN
-_CN_ID_RE = re.compile(r"^[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]$")
-_JA_ID_RE = re.compile(r"^\d{12}$")
 _ES_ID_RE = re.compile(r"^(?:\d{8}[A-Z]|[XYZ]\d{7}[A-Z])$")
+_IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{4,30}$") # IBAN
+
 
 # Deterministic helpers (HMAC-based)
 
@@ -145,17 +141,7 @@ def _compute_luhn_digit(partial_num: str) -> str:
         should_double = not should_double
     return str((10 - (sum_ % 10)) % 10)
 
-def _compute_cn_id_check(partial: str) -> str:
-    weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
-    check_digits = "10X98765432"
-    total = sum(int(partial[i]) * weights[i] for i in range(17))
-    return check_digits[total % 11]
 
-def _compute_ja_id_check(partial: str) -> int:
-    weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
-    total = sum(int(partial[i]) * weights[i] for i in range(11))
-    remainder = total % 11
-    return 0 if remainder <= 1 else 11 - remainder
 
 def _compute_es_id_check(num: int) -> str:
     return "TRWAGMYFPDXBNJZSQVHLCKE"[num % 23]
@@ -170,11 +156,6 @@ def generate_fpe_token(raw_text: str, entity_type: str = "UNKNOWN") -> str:
         elif _SSN_RE.match(text): type_ = "US_SSN"
         elif _CC_RE.match(text): type_ = "CREDIT_CARD"
         elif _ROUTING_RE.match(text): type_ = "US_ROUTING_NUMBER"
-        elif _TCID_RE.match(text): type_ = "TR_TCID"
-        elif _SAUDI_NID_RE.match(text): type_ = "SA_NATIONAL_ID"
-        elif _UAE_EID_RE.match(text): type_ = "UAE_EMIRATES_ID"
-        elif _CN_ID_RE.match(text): type_ = "CN_ID"
-        elif _JA_ID_RE.match(text): type_ = "JA_ID"
         elif _ES_ID_RE.match(text): type_ = "ES_ID"
         elif _IBAN_RE.match(text): type_ = "INTL_BANK_IBAN"
         elif _PHONE_RE.match(text): type_ = "PHONE_NUMBER"
@@ -196,36 +177,9 @@ def generate_fpe_token(raw_text: str, entity_type: str = "UNKNOWN") -> str:
     if type_ in ("US_ROUTING_NUMBER", "US_ABA_ROUTING"):
         return f"000000{_hmac_digits(text, 3)}"
 
-    if type_ == "TR_TCID":
-        # Format: 990000 (6) + 4 digits (d7-d10) + 1 even-parity digit (d11) = 11 chars
-        core = _hmac_digits(text, 4)        # digits d7-d10
-        partial = f"990000{core}"           # 10 chars
-        sum1_10 = sum(int(x) for x in partial)
-        d11_raw = sum1_10 % 10
-        d11 = d11_raw if d11_raw % 2 == 0 else (d11_raw + 1) % 10
-        return f"{partial}{d11}"
-
-    if type_ == "SA_NATIONAL_ID":
-        return f"100000{_hmac_digits(text, 4)}"
-
-    if type_ == "UAE_EMIRATES_ID":
-        base = f"7840000{_hmac_digits(text, 7)}"
-        check_dig = _compute_luhn_digit(base)
-        return f"784-0000-{base[7:14]}-{check_dig}"
-
     if type_ in ("INTL_BANK_IBAN", "IBAN_CODE"):
         country = text[:2].upper() if len(text) >= 2 and text[:2].isalpha() else "US"
         return f"{country}00{_hmac_hex(text, n=8).upper()}"
-
-    if type_ == "CN_ID":
-        # Format: 880000 (Prefix) + 19900101 (Fixed Birth) + 3 digits + check
-        base = f"88000019900101{_hmac_digits(text, 3)}"
-        return base + _compute_cn_id_check(base)
-
-    if type_ == "JA_ID":
-        # Format: 000000 (Prefix) + 5 digits + check
-        base = f"000000{_hmac_digits(text, 5)}"
-        return base + str(_compute_ja_id_check(base))
 
     if type_ == "ES_DNI":
         # Format: 000 + 5 digits + check letter
@@ -262,11 +216,6 @@ TOKEN_PATTERN = re.compile(
     r"|000-00-\d{4}"                            # SSN
     r"|4000-0000-0000-\d{4}"                    # CC
     r"|000000\d{3}"                             # Routing
-    r"|990000\d{4}[02468]"                      # Turkish TCID token
-    r"|100000\d{4}"                             # Saudi NID token
-    r"|784-0000-\d{7}-\d"                       # UAE EID token
-    r"|88000019900101\d{3}[0-9X]"               # Chinese ID token
-    r"|000000\d{6}"                             # Japanese ID token
     r"|000\d{5}[A-Z]"                           # Spanish DNI token
     r"|[A-Z]{2}00[A-F0-9]{4,16}"                # IBAN token
     r"|<(?:PER|LOC|ORG):[^>]+>"                 # Semantic NLP tokens
@@ -310,28 +259,8 @@ def looks_like_token(value: str) -> bool:
     if v.startswith("000000") and len(v) == 9 and v[6:].isdigit():
         return True
 
-    # UAE Emirates ID tokens: 784-0000-XXXXXXX-X
-    if v.startswith("784-0000-") and len(v) == 18:
-        return True
-
-    # Turkish TCID tokens
-    if len(v) == 11 and v.startswith("990000") and v.isdigit() and int(v[-1]) % 2 == 0:
-        return True
-        
-    # Saudi NID tokens
-    if len(v) == 10 and v.startswith("100000") and v.isdigit():
-        return True
-
     # IBAN tokens: XX00... (zero check digits indicate synthetic)
     if len(v) >= 8 and v[:2].isalpha() and v[2:4] == "00":
-        return True
-
-    # Chinese ID tokens
-    if v.startswith("88000019900101") and len(v) == 18:
-        return True
-
-    # Japanese ID tokens
-    if v.startswith("000000") and len(v) == 12:
         return True
 
     # Spanish ID tokens

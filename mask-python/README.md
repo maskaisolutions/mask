@@ -104,9 +104,9 @@ Mask includes the ability to detokenize PII embedded within larger text blocks (
 - **Probabilistic Vault Cleanup**: `MemoryVault` uses a probabilistic $O(1)$ cleanup strategy to avoid $O(N)$ blocking scans. Frequency is configurable via `MASK_VAULT_CLEANUP_FREQUENCY`.
 - **Thread-Safe Singletons**: Core accessors for `Vault`, `KeyProvider`, and `Scanner` are thread-safe and lazily initialized, preventing race conditions during high-concurrency app startup.
 
-## Multilingual PII Detection (Waterfall Pipeline)
+## Language-Specific PII Detection (Waterfall Pipeline)
 
-Mask is built for the global enterprise. While many privacy tools are English-centric, Mask implements a **3-Tier Waterfall Detection** strategy designed for high-performance PII detection across 8 major languages.
+Mask provides high-precision PII detection for **English (en)** and **Spanish (es)**.
 
 ### Supported Language Matrix
 
@@ -116,12 +116,6 @@ Mask provides first-class support for the following languages:
 | :--- | :--- | :--- | :--- |
 | **English** | `en` | ✅ Full | spaCy (`en_core_web_sm`) |
 | **Spanish** | `es` | ✅ Full | spaCy (`es_core_news_sm`) |
-| **French** | `fr` | ✅ Full | spaCy (`fr_core_news_sm`) |
-| **German** | `de` | ✅ Full | spaCy (`de_core_news_sm`) |
-| **Turkish** | `tr` | ✅ Full | spaCy (`tr_core_news_trf`) |
-| **Arabic** | `ar` | ✅ Full | Transformers (`bert-base-multilingual`) |
-| **Japanese** | `ja` | ✅ Full | spaCy (`ja_core_news_sm`) |
-| **Chinese** | `zh` | ✅ Full | spaCy (`zh_core_web_sm`) |
 
 ### How the Waterfall Works: The Excising Mechanism
 
@@ -140,8 +134,8 @@ Configure your multilingual environment using standard variables. These are pars
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `MASK_LANGUAGES` | `en` | Comma-separated list of supported languages (e.g., `en,es,fr,ar`). |
-| `MASK_NLP_ENGINE` | `spacy` | Options: `spacy` or `transformers`. Arabic always forces `transformers`. |
+| `MASK_LANGUAGES` | `en` | Comma-separated list of supported languages. Supported: `en`, `es`. |
+| `MASK_NLP_ENGINE` | `spacy` | Options: `spacy` or `transformers`. |
 | `MASK_NLP_MODEL` | *(varies)* | Override the default model (e.g., `Davlan/bert-base-multilingual-cased-ner-hrl`). |
 | `MASK_NLP_MAX_WORKERS` | `4` | Number of worker processes to spawn for parallel NLP analysis. |
 | `MASK_NLP_TIMEOUT_SECONDS` | `60.0` | Max duration for a single NLP scan before returning original text. |
@@ -165,13 +159,7 @@ python -m spacy download en_core_web_md
 
 # Spanish support
 python -m spacy download es_core_news_md
-
-# French support
-python -m spacy download fr_core_news_md
 ```
-
-#### 3. Arabic Support (Transformers)
-If you include `ar` in `MASK_LANGUAGES`, Mask automatically initializes a Transformers pipeline. No manual spaCy download is required for Arabic, but ensure you have enough RAM (~1GB) for the model.
 
 ---
 
@@ -219,7 +207,7 @@ For production environments, air-gapped clusters, or to avoid cold-start latency
 pip install "mask-privacy[spacy]"
 
 # 2. Use the CLI to download models for your required languages
-export MASK_LANGUAGES="en,es,fr"
+export MASK_LANGUAGES="en,es"
 python -m mask_privacy.cli cache-models
 ```
 
@@ -292,7 +280,7 @@ For production air-gapped environments or to avoid "cold-start" latency, use the
 ```bash
 # Cache English and Spanish models to a specific directory
 export MASK_MODEL_CACHE_DIR="./models"
-python -m mask_privacy.cli cache-models --languages en,es --engine presidio
+python -m mask_privacy.cli cache-models --languages en,es --engine spacy
 ```
 
 #### 3. Select vault type

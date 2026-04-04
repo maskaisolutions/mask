@@ -56,13 +56,8 @@ const _PHONE_INTL_RE = /(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\
 const _SSN_RE = /^\d{3}-\d{2}-\d{4}$/;
 const _CC_RE = /^(?:\d{4}[ \-]?){3}\d{4}$/;
 const _ROUTING_RE = /^\d{9}$/;
-const _TCID_RE = /^[1-9]\d{9}[02468]$/;
-const _SAUDI_NID_RE = /^1\d{9}$/;
-const _UAE_EID_RE = /^784-\d{4}-\d{7}-\d$/;
-const _IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{4,30}$/;
-const _CN_ID_RE = /^[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx]$/;
-const _JA_ID_RE = /^\d{12}$/;
 const _ES_ID_RE = /^(?:\d{8}[A-Z]|[XYZ]\d{7}[A-Z])$/;
+const _IBAN_RE = /^[A-Z]{2}\d{2}[A-Z0-9]{4,30}$/;
 
 // Deterministic helpers (HMAC-based)
 
@@ -128,25 +123,7 @@ function _computeLuhnDigit(partialNum: string): string {
     return ((10 - (sum % 10)) % 10).toString();
 }
 
-function _computeCnIdCheck(partial: string): string {
-  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
-  const checkDigits = "10X98765432";
-  let total = 0;
-  for (let i = 0; i < 17; i++) {
-    total += parseInt(partial[i], 10) * weights[i];
-  }
-  return checkDigits[total % 11];
-}
 
-function _computeJaIdCheck(partial: string): number {
-  const weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
-  let total = 0;
-  for (let i = 0; i < 11; i++) {
-    total += parseInt(partial[i], 10) * weights[i];
-  }
-  const remainder = total % 11;
-  return remainder <= 1 ? 0 : 11 - remainder;
-}
 
 function _computeEsIdCheck(num: number): string {
   return "TRWAGMYFPDXBNJZSQVHLCKE"[num % 23];
@@ -166,11 +143,6 @@ export async function generateFPEToken(rawText: string, entityType: string = 'UN
     else if (_SSN_RE.test(text)) type = "US_SSN";
     else if (_CC_RE.test(text)) type = "CREDIT_CARD";
     else if (_ROUTING_RE.test(text)) type = "US_ROUTING_NUMBER";
-    else if (_TCID_RE.test(text)) type = "TR_TCID";
-    else if (_SAUDI_NID_RE.test(text)) type = "SA_NATIONAL_ID";
-    else if (_UAE_EID_RE.test(text)) type = "UAE_EMIRATES_ID";
-    else if (_CN_ID_RE.test(text)) type = "CN_ID";
-    else if (_JA_ID_RE.test(text)) type = "JA_ID";
     else if (_ES_ID_RE.test(text)) type = "ES_DNI";
     else if (_IBAN_RE.test(text)) type = "INTL_BANK_IBAN";
     else if (_PHONE_RE.test(text)) type = "PHONE_NUMBER";
@@ -203,39 +175,9 @@ export async function generateFPEToken(rawText: string, entityType: string = 'UN
     return `000000${await _hmacDigits(text, 3)}`;
   }
 
-  if (type === "TR_TCID") {
-    const core = await _hmacDigits(text, 4);
-    const partial = `990000${core}`;
-    let sum1_10 = 0;
-    for (let i = 0; i < partial.length; i++) sum1_10 += parseInt(partial[i], 10);
-    const d11Raw = sum1_10 % 10;
-    const d11 = d11Raw % 2 === 0 ? d11Raw : (d11Raw + 1) % 10;
-    return `${partial}${d11}`;
-  }
-
-  if (type === "SA_NATIONAL_ID") {
-    return `100000${await _hmacDigits(text, 4)}`;
-  }
-
-  if (type === "UAE_EMIRATES_ID") {
-    const base = `7840000${await _hmacDigits(text, 7)}`;
-    const checkDig = _computeLuhnDigit(base);
-    return `784-0000-${base.slice(7, 14)}-${checkDig}`;
-  }
-
   if (type === "INTL_BANK_IBAN" || type === "IBAN_CODE") {
     const countryCode = (text.length >= 2 && /[a-zA-Z]{2}/.test(text.slice(0, 2))) ? text.slice(0, 2).toUpperCase() : "US";
     return `${countryCode}00${(await _hmacHex(text, 8)).toUpperCase()}`;
-  }
-
-  if (type === "CN_ID") {
-    const base = `88000019900101${await _hmacDigits(text, 3)}`;
-    return base + _computeCnIdCheck(base);
-  }
-
-  if (type === "JA_ID") {
-    const base = `000000${await _hmacDigits(text, 5)}`;
-    return base + _computeJaIdCheck(base).toString();
   }
 
   if (type === "ES_DNI") {

@@ -14,25 +14,14 @@ ensuring the NLP engine never wastes compute on already-masked entities
 and cannot produce contradictory results.
 """
 
-import os
 import re
 import logging
 import asyncio
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Optional, List, Dict, Callable, Awaitable, Any, Union
-
-try:
-    from presidio_analyzer import AnalyzerEngine
-    from presidio_anonymizer import AnonymizerEngine
-    from presidio_anonymizer.entities import OperatorConfig
-except ImportError:
-    raise ImportError(
-        "Presidio packages are required. Install with: "
-        "pip install presidio-analyzer presidio-anonymizer"
-    )
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from typing import Optional, List, Dict, Callable, Awaitable, Any
 
 from mask_privacy.core.vault import encode
-from mask_privacy.core.fpe import generate_fpe_token, looks_like_token
+from mask_privacy.core.fpe import looks_like_token
 from mask_privacy.core.span import Span, resolve_overlaps, reconstruct
 
 # DLP Pipeline imports — multilingual detection + 50-type registry
@@ -53,77 +42,37 @@ def _init_worker() -> None:
     """Initialize the Presidio Analyzer inside the worker process to avoid pickling models."""
     global _worker_analyzer
     import spacy
-    import os
     from presidio_analyzer import AnalyzerEngine
     from presidio_analyzer.nlp_engine import NlpEngineProvider
 
     req_langs = [lang.strip().lower() for lang in config.MASK_LANGUAGES.split(",")]
-    nlp_engine_name = config.MASK_NLP_ENGINE
-    
+    # Restrict to supported languages only
+    req_langs = [l for l in req_langs if l in ("en", "es")]
+    if not req_langs:
+        req_langs = ["en"]
+
+    lang_to_spacy_map = {
+        "en": ["en_core_web_lg", "en_core_web_md", "en_core_web_sm"],
+        "es": ["es_core_news_lg", "es_core_news_md", "es_core_news_sm"],
+    }
     models_config = []
     supported_langs = []
-    
-    if nlp_engine_name == "transformers" or "ar" in req_langs:
-        hf_model = config.MASK_NLP_MODEL or "Davlan/bert-base-multilingual-cased-ner-hrl"
-        for lang in req_langs:
-            spacy_model = "en_core_web_sm"
-            lang_to_spacy = {
-                "en": ["en_core_web_sm"], "es": ["es_core_news_sm"], "fr": ["fr_core_news_sm"],
-                "de": ["de_core_news_sm"], "tr": ["tr_core_news_trf", "en_core_web_sm"], 
-                "ar": ["en_core_web_sm"], "ja": ["ja_core_news_sm"], "zh": ["zh_core_web_sm"]
-            }
-            for c in lang_to_spacy.get(lang, ["en_core_web_sm"]):
-                if spacy.util.is_package(c):
-                    spacy_model = c
-                    break
-            
-            models_config.append({
-                "lang_code": lang,
-                "model_name": {"spacy": spacy_model, "transformers": hf_model}
-            })
+    for lang in req_langs:
+        selected_model = None
+        for m in lang_to_spacy_map.get(lang, ["en_core_web_sm"]):
+            if spacy.util.is_package(m):
+                selected_model = m
+                break
+        if selected_model:
+            models_config.append({"lang_code": lang, "model_name": selected_model})
             supported_langs.append(lang)
-            
-        provider = NlpEngineProvider(nlp_configuration={
-            "nlp_engine_name": "transformers",
-            "models": models_config,
-            "ner_model_configuration": {
-                "model_to_presidio_entity_mapping": {
-                    "PER": "PERSON", "PERSON": "PERSON", "LOC": "LOCATION", "LOCATION": "LOCATION",
-                    "GPE": "LOCATION", "ORG": "ORGANIZATION", "ORGANIZATION": "ORGANIZATION"
-                },
-                "low_confidence_score_multiplier": 0.4,
-                "low_score_entity_names": ["ORGANIZATION", "ORG"],
-                "default_score": 0.85
-            }
-        })
-    else:
-        lang_to_spacy_map = {
-            "en": ["en_core_web_lg", "en_core_web_md", "en_core_web_sm"],
-            "es": ["es_core_news_lg", "es_core_news_md", "es_core_news_sm"],
-            "fr": ["fr_core_news_lg", "fr_core_news_md", "fr_core_news_sm"],
-            "de": ["de_core_news_lg", "de_core_news_md", "de_core_news_sm"],
-            "tr": ["tr_core_news_trf", "en_core_web_lg"],
-            "ja": ["ja_core_news_lg", "ja_core_news_md", "ja_core_news_sm"],
-            "zh": ["zh_core_web_lg", "zh_core_web_md", "zh_core_web_sm"],
-            "ar": ["en_core_web_sm"]
-        }
-        for lang in req_langs:
-            selected_model = None
-            for m in lang_to_spacy_map.get(lang, ["en_core_web_sm"]):
-                if spacy.util.is_package(m):
-                    selected_model = m
-                    break
-            if selected_model:
-                models_config.append({"lang_code": lang, "model_name": selected_model})
-                supported_langs.append(lang)
-            else:
-                logger.warning(f"No spaCy model found for language '{lang}'.")
-        
-        if not models_config:
-            return
-            
-        provider = NlpEngineProvider(nlp_configuration={"nlp_engine_name": "spacy", "models": models_config})
-        
+        else:
+            logger.warning(f"No spaCy model found for language '{lang}'.")
+
+    if not models_config:
+        return
+
+    provider = NlpEngineProvider(nlp_configuration={"nlp_engine_name": "spacy", "models": models_config})
     _worker_analyzer = AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=supported_langs)
 
 def _run_analyzer(text: str, entities: List[str], language: str = "en") -> Any:
@@ -159,7 +108,7 @@ REGEX_PATTERNS: Dict[str, re.Pattern] = {
     ),
     "PHONE_NUMBER": re.compile(r"(?<!\d)(?:\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}|\d{3}[\s\-.]?\d{4})(?!\d)"),
     "PHONE_INTL": re.compile(r"(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)"),
-    # International phone numbers (UK +44, France +33, Germany +49)
+    # International phone numbers
     "PHONE_NUMBER_INTL": re.compile(
         r"\+(?:44|33|49)[\s\-.]?\(?\d{1,5}\)?(?:[\s\-.]?\d{2,4}){2,4}"
     ),

@@ -6,7 +6,7 @@ Provides format-preserving encryption, local/distributed vaulting,
 and framework-agnostic tool interception hooks.
 """
 
-__version__ = "2.0.0"
+__version__ = "3.2.0"
 
 from mask_privacy.core.vault import (
     get_vault,

@@ -171,89 +171,7 @@ def check_ipv4_octets(raw: str) -> bool:
     return True
 
 
-# ── Turkish TCID (11-digit Kimlik No) ────────────────────────────────────────
-
-def check_tcid_number(raw: str) -> bool:
-    """Full Turkish TC Kimlik Numarası checksum (10th + 11th digit rules).
-
-    Algorithm:
-      - 11 digits; first digit ≠ 0; last digit is even.
-      - d10 = ((sum of odd-pos digits * 7) − sum of even-pos digits) mod 10
-      - d11 = (sum of first 10 digits) mod 10
-    """
-    digits_str = re.sub(r"\D", "", raw)
-    if len(digits_str) != 11:
-        return False
-    d = [int(c) for c in digits_str]
-    if d[0] == 0:
-        return False
-    if d[10] % 2 != 0:
-        return False
-
-    odd_sum = d[0] + d[2] + d[4] + d[6] + d[8]
-    even_sum = d[1] + d[3] + d[5] + d[7]
-    computed_d10 = (odd_sum * 7 - even_sum) % 10
-    if computed_d10 != d[9]:
-        return False
-
-    first_ten_sum = sum(d[:10])
-    if first_ten_sum % 10 != d[10]:
-        return False
-
-    return True
-
-
-# ── Saudi National ID (10-digit, starts with 1) ─────────────────────────────
-
-def check_saudi_nid(raw: str) -> bool:
-    """Saudi NID weighted-sum checksum.
-
-    - 10 digits, first digit must be 1.
-    - Odd-position digits are doubled; if result ≥ 10, subtract 9.
-    - Sum of all processed digits mod 10 must equal 0.
-    """
-    digits_str = re.sub(r"\D", "", raw)
-    if len(digits_str) != 10:
-        return False
-    d = [int(c) for c in digits_str]
-    if d[0] != 1:
-        return False
-
-    total = 0
-    for idx in range(10):
-        val = d[idx]
-        if idx % 2 == 0:          # 0-indexed odd positions
-            val *= 2
-            if val > 9:
-                val -= 9
-        total += val
-    return total % 10 == 0
-
-
-# ── French INSEE (Mod-97) ───────────────────────────────────────────────────
-
-def check_fr_insee(raw: str) -> bool:
-    """Validate French Social Security Number (NIR) using Modulo 97.
-    
-    Replaces Corsican identifiers '2A' with '19' and '2B' with '18'.
-    Expects exactly 15 characters (13 for the key, 2 for the checksum).
-    """
-    cleaned = raw.replace(" ", "").upper()
-    if len(cleaned) != 15:
-        return False
-    # Handle Corsica
-    cleaned = cleaned.replace("2A", "19").replace("2B", "18")
-    if not cleaned.isdigit():
-        return False
-        
-    base_number = int(cleaned[:13])
-    expected_key = int(cleaned[13:])
-    
-    calculated_key = 97 - (base_number % 97)
-    return calculated_key == expected_key
-
-
-# ── Canadian SIN (Luhn-9) ───────────────────────────────────────────────────
+# ── Canadian SIN (Luhn-9) ────────────────────────────────────────────────────
 
 def check_ca_sin(raw: str) -> bool:
     """Validate Canadian Social Insurance Number.
@@ -292,62 +210,6 @@ def check_uk_nino(raw: str) -> bool:
     if len(cleaned) != 9:
         return False
     return bool(_UK_NINO_REGEX.match(cleaned))
-
-
-# ── Chinese ID (18-digit, ISO 7064:1983.MOD 11-2) ───────────────────────────
-
-def check_cn_id(raw: str) -> bool:
-    """Validate 18-digit Chinese Resident Identity Card.
-    
-    Algorithm uses a weighted sum of the first 17 digits, modulo 11.
-    The 18th char is a check digit (0-9 or 'X').
-    """
-    cleaned = re.sub(r"[^0-9X]", "", raw.upper())
-    if len(cleaned) != 18:
-        return False
-    
-    # Weights for first 17 digits
-    weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
-    # Check digit mapping (remainder -> char)
-    check_digits = "10X98765432"
-    
-    try:
-        total = sum(int(cleaned[i]) * weights[i] for i in range(17))
-        remainder = total % 11
-        return cleaned[17] == check_digits[remainder]
-    except (ValueError, IndexError):
-        return False
-
-
-# ── Japanese Individual Number (12-digit, Modulo 11) ────────────────────────
-
-def check_ja_id(raw: str) -> bool:
-    """Validate 12-digit Japanese Individual Number (My Number).
-    
-    Uses a weighted sum modulo 11.
-    """
-    cleaned = re.sub(r"\D", "", raw)
-    if len(cleaned) != 12:
-        return False
-        
-    d = [int(c) for c in cleaned]
-    # Weights for digits 1-11
-    # Pn * Qn where Qn = (n % 6) + 1 if 1<=n<=6, else (n-6)%6 + 1? 
-    # Standard: Qn = n+1 for 1<=n<=6, Qn = n-5 for 7<=n<=11
-    # Actually simpler: [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2] starting from d11 down to d1
-    weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2] # for digits cleaned[0:11] in reverse?
-    # Correct weights (from digit 11 to 1): 2, 3, 4, 5, 6, 7, 2, 3, 4, 5, 6
-    weights = [6, 5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
-    
-    total = sum(d[i] * weights[i] for i in range(11))
-    remainder = total % 11
-    
-    if remainder <= 1:
-        expected = 0
-    else:
-        expected = 11 - remainder
-        
-    return d[11] == expected
 
 
 # ── Spanish DNI/NIE (8 digits + 1 letter) ───────────────────────────────────
@@ -389,13 +251,8 @@ _VALIDATOR_DISPATCH = {
     "vin_format": check_vin_format,
     "btc_format": check_btc_format,
     "ipv4":       check_ipv4_octets,
-    "tcid":       check_tcid_number,
-    "saudi_nid":  check_saudi_nid,
-    "fr_insee":   check_fr_insee,
     "ca_sin":     check_ca_sin,
     "uk_nino":    check_uk_nino,
-    "cn_id":      check_cn_id,
-    "ja_id":      check_ja_id,
     "es_id":      check_es_id,
 }
 

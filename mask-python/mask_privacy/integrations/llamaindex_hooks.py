@@ -16,6 +16,9 @@ Usage:
 import logging
 from typing import Any, Dict, Optional
 
+import contextlib
+from unittest.mock import patch
+
 from mask_privacy.core.utils import deep_decode, deep_encode_pii
 
 logger = logging.getLogger("mask.integrations.llamaindex")
@@ -63,7 +66,7 @@ class MaskToolWrapper:
 
 try:
     from llama_index.core.callbacks.base_handler import BaseCallbackHandler  # type: ignore
-    from llama_index.core.callbacks.schema import CBEventType, EventPayload  # type: ignore
+    from llama_index.core.callbacks.schema import CBEventType  # type: ignore
 
     class MaskCallbackHandler(BaseCallbackHandler):
         """LlamaIndex callback that logs privacy events for audit."""
@@ -125,9 +128,6 @@ except ImportError:
                 "llama-index-core is required for LlamaIndex integration. "
                 "Install with: pip install llama-index-core"
             )
-
-import contextlib
-from unittest.mock import patch
 
 @contextlib.contextmanager
 def mask_llamaindex_hooks(client: Any = None):

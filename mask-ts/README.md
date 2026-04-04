@@ -87,12 +87,6 @@ Mask prevents the misidentification of real data as tokens by using universally 
 
 This prefix-based approach ensures that the SDK does not inadvertently process valid PII as an existing token.
 
-Additional collision-proof prefixes for international identifiers:
-* Turkish TCID tokens use the `990000` prefix (no valid Kimlik number starts with `99`).
-* Saudi NID tokens use the `100000` prefix (length-constrained to avoid overlap with real IDs).
-* UAE Emirates ID tokens use the `784-0000-` prefix (zeroed sub-fields are structurally invalid).
-* IBAN tokens zero the check digits (`XX00...`), which always fails ISO 7064 Mod-97 verification.
-
 ### 4. Enterprise Async Support
 Mask is built from the ground up for high-concurrency Node.js environments. All core operations are asynchronous and promised-based. Calling `encode()`, `decode()`, or `scanAndTokenize()` allows your event loop to remain unblocked while handling PII tokenization tasks.
 
@@ -135,7 +129,7 @@ Mask includes the ability to detokenize PII embedded within larger text blocks (
 
 ## Multilingual PII Detection (Waterfall Pipeline)
 
-Mask is built for the global enterprise. While many privacy tools are English-centric, the TypeScript SDK implements a **3-Tier Waterfall Detection** strategy designed for high-performance PII detection across 8 major languages using local ONNX models.
+Mask is built for the global enterprise. The TypeScript SDK implements a **3-Tier Waterfall Detection** strategy for high-precision PII detection in **English and Spanish** using local ONNX models.
 
 ### Supported Language Matrix
 
@@ -145,12 +139,6 @@ Mask provides first-class support for the following languages:
 | :--- | :--- | :--- | :--- |
 | **English** | `en` | ✅ Full | DistilBERT (Simple) |
 | **Spanish** | `es` | ✅ Full | BERT Multilingual |
-| **French** | `fr` | ✅ Full | BERT Multilingual |
-| **German** | `de` | ✅ Full | BERT Multilingual |
-| **Turkish** | `tr` | ✅ Full | BERT Multilingual |
-| **Arabic** | `ar` | ✅ Full | BERT Multilingual |
-| **Japanese** | `ja` | ✅ Full | BERT Multilingual |
-| **Chinese** | `zh` | ✅ Full | BERT Multilingual |
 
 ### How the Waterfall Works: The Excising Mechanism
 
@@ -165,11 +153,11 @@ To maintain high performance, the TypeScript SDK does not simply run three separ
 
 ### Configuration & Environment Variables
 
-Configure your multilingual environment using standard variables. These are parsed at runtime when the `LocalTransformersScanner` is initialized.
+Configure your language environment using standard variables.
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `MASK_LANGUAGES` | `en` | Comma-separated list of languages (e.g., `en,es,fr,ar`). |
+| `MASK_LANGUAGES` | `en` | Comma-separated language codes. Supported: `en`, `es`. |
 | `MASK_NLP_MODEL` | *(varies)* | Override the default model (e.g., `Xenova/bert-base-multilingual-cased-ner-hrl`). |
 | `MASK_MODEL_CACHE_DIR` | `~/.cache` | Local directory for storing serialized ONNX models. |
 | `MASK_NLP_MAX_WORKERS` | `4` | Number of worker processes/threads for NLP analysis. |
@@ -221,8 +209,8 @@ The TypeScript SDK manages AI models automatically via **Transformers.js**. For 
 ```bash
 npm install @huggingface/transformers # Required extra
 
-# Pre-cache models for your required languages
-export MASK_LANGUAGES="en,es,fr"
+# Pre-cache models for English and Spanish
+export MASK_LANGUAGES="en,es"
 npx mask-privacy cache-models
 ```
 
