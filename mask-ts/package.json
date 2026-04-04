@@ -1,6 +1,6 @@
 {
   "name": "mask-privacy",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Enterprise-grade AI Data Loss Prevention (DLP) SDK for TypeScript",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
