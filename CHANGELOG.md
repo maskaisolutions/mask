@@ -5,12 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.3.0]
+## [3.4.0]
 
 ### Added
+- **2-Tier Model-Augmented Waterfall:** Optimized the detection pipeline into a primary High-Precision Deterministic Tier (Registry + Checksums) and a secondary Probabilistic Neural Tier (PERSON, LOCATION, ORGANIZATION).
 - **Unified DLP Registry:** Consolidated over 50+ sensitive data signatures (Financial, Identity, Contact, Health) into a single, shared source of truth between Python and TypeScript.
-- **Deep Spanish PII Support:** Production-grade detection for Spanish Social Security (NUSS), Bank Accounts (CCC), and Identity (DNI/NIE) with full checksum verification (Mod-97/Mod-11).
-- **Proximity Context Boosting:** Added language-specific term lists (e.g., *cuenta*, *seguridad social*, *nacimiento*) to boost detection confidence based on surrounding context.
+- **Deep Spanish PII Support:** Production-grade detection for Spanish Social Security (NUSS), Bank Accounts (CCC), and Identity (DNI/NIE) with full checksum verification (Mod-97/Mod-11) and Proximity Context Boosting.
 - **Fail-Shut Security Strategy:** Default `MASK_FAIL_STRATEGY=closed` to prevent PII leakage when vault infrastructure is unreachable.
 
 ### Changed
@@ -24,4 +24,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[3.3.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.3.0
+[3.4.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.4.0

@@ -6,7 +6,7 @@
  * and framework-agnostic tool interception hooks.
  */
 
-export const VERSION = "3.3.0";
+export const VERSION = "3.4.0";
 
 export {
     getVault,
