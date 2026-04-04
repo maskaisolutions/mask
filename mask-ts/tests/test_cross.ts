@@ -1,4 +1,4 @@
-import { CryptoEngine } from './src/core/crypto';
+import { CryptoEngine } from '../src/core/crypto';
 import * as process from 'process';
 
 async function test() {
