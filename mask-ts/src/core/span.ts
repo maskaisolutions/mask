@@ -14,6 +14,9 @@ export interface Span {
   confidence: number;
   method: string;      // "dlp_heuristic" | "regex" | "nlp"
   language?: string;
+  // Audit trail fields (DSPM compliance)
+  ruleId?: string;                 // e.g. "MASK-FIN-001"
+  complianceScope?: ReadonlySet<string>;  // e.g. {"PCI-DSS", "HIPAA"}
   maskedValue?: string;
 }
 

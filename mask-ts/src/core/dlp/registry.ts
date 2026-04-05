@@ -35,6 +35,8 @@ export interface PatternDescriptor {
   validatorTag: string | null;
   isHighEntropy: boolean;
   supportedLocales: string[];
+  ruleId: string;                         // Unique ID for compliance audit trail
+  complianceScope: ReadonlySet<string>;    // Compliance frameworks: {"PCI-DSS", "HIPAA", ...}
 }
 
 // ── Locale-specific auxiliary patterns ──────────────────────────────────────
@@ -71,6 +73,8 @@ type RawEntry = [
   validatorTag: string | null,
   isHighEntropy?: boolean,
   supportedLocales?: string[],
+  ruleId?: string,
+  complianceScope?: string[],
 ];
 
 const RAW_PATTERNS: RawEntry[] = [
@@ -291,7 +295,7 @@ export class DLPPatternRegistry {
 
   private buildCatalogue(restrict: ReadonlySet<SensitiveCategory> | null): void {
     for (const entry of RAW_PATTERNS) {
-      const [typeName, regexSource, terms, risk, cat, vtag, isHighEntropy, supportedLocales] = entry;
+      const [typeName, regexSource, terms, risk, cat, vtag, isHighEntropy, supportedLocales, ruleId, complianceScope] = entry;
       if (restrict !== null && !restrict.has(cat)) continue;
 
       let re: RegExp;
@@ -309,6 +313,8 @@ export class DLPPatternRegistry {
         validatorTag: vtag,
         isHighEntropy: isHighEntropy ?? (vtag !== null),
         supportedLocales: supportedLocales ?? ["*"],
+        ruleId: ruleId ?? `MASK-${cat.slice(0, 3)}-${typeName}`,
+        complianceScope: new Set(complianceScope ?? []),
       });
     }
   }

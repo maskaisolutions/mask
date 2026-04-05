@@ -36,6 +36,11 @@ export const config = {
   get MASK_DEV_MODE() { return getEnvBool('MASK_DEV_MODE', false); },
   get MASK_LOG_LEVEL() { return (process.env.MASK_LOG_LEVEL || 'info').toLowerCase(); },
 
+  // --- COMPLIANCE & PRIVACY (Bijective) ---
+  get MASK_TENANT_ID() { return process.env.MASK_TENANT_ID || 'global-default-tenant'; },
+  get MASK_SALT_ROTATION() { return (process.env.MASK_SALT_ROTATION || 'NONE').toUpperCase(); },
+  get MASK_BIJECTIVE_MODE() { return getEnvBool('MASK_BIJECTIVE_MODE', true); },
+
   // --- SECURITY & CRYPTOGRAPHY ---
   get MASK_ENCRYPTION_KEY() { return process.env.MASK_ENCRYPTION_KEY || null; },
   get MASK_MASTER_KEY() { 

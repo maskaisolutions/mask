@@ -36,6 +36,12 @@ def __getattr__(name: str):
         return get_env_bool("MASK_DEV_MODE", False)
     if name == "MASK_LOG_LEVEL":
         return os.environ.get("MASK_LOG_LEVEL", "info").lower()
+    if name == "MASK_TENANT_ID":
+        return os.environ.get("MASK_TENANT_ID", "global-default-tenant")
+    if name == "MASK_SALT_ROTATION":
+        return os.environ.get("MASK_SALT_ROTATION", "NONE").upper()
+    if name == "MASK_BIJECTIVE_MODE":
+        return get_env_bool("MASK_BIJECTIVE_MODE", True)
     
     # Security
     if name == "MASK_ENCRYPTION_KEY":
@@ -103,8 +109,10 @@ def __getattr__(name: str):
 
 # Redefine constants as placeholders for static analyzers (optional but good for IDEs)
 # Note: they will be shadowed by __getattr__ for actual runtime access in 3.7+
-MASK_ENV: str
-MASK_DEV_MODE: bool
+MASK_LOG_LEVEL: str
+MASK_TENANT_ID: str
+MASK_SALT_ROTATION: str
+MASK_BIJECTIVE_MODE: bool
 MASK_ENCRYPTION_KEY: Optional[str]
 MASK_MASTER_KEY: str
 MASK_ENCRYPTED_KEY: Optional[str]

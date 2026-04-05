@@ -202,6 +202,8 @@ class PresidioScanner:
                             confidence=conf,
                             method="dlp_heuristic",
                             language=locale,
+                            rule_id=descriptor.rule_id,
+                            compliance_scope=descriptor.compliance_scope,
                         ))
 
         # Pass 2: Locale-tuned name patterns (JIT — only for detected language)
@@ -267,6 +269,8 @@ class PresidioScanner:
                 "value": span.original_value, "method": span.method,
                 "confidence": span.confidence, "masked_value": span.masked_value,
                 "language": span.language,
+                "rule_id": span.rule_id,
+                "compliance_scope": list(span.compliance_scope) if span.compliance_scope else [],
             })
         return reconstruct(text, resolved), entities
 
@@ -456,6 +460,8 @@ class PresidioScanner:
                 "value": span.original_value, "method": span.method,
                 "confidence": span.confidence, "masked_value": span.masked_value,
                 "language": span.language,
+                "rule_id": span.rule_id,
+                "compliance_scope": list(span.compliance_scope) if span.compliance_scope else [],
             })
 
         remaining = reconstruct(text, resolved)
@@ -517,11 +523,14 @@ class PresidioScanner:
         # ── Resolve overlaps; encode all deterministic tokens in parallel ──
         resolved = resolve_overlaps(all_spans)
         if resolved:
+            _semaphore = asyncio.Semaphore(50)
+
             async def _enc(v: str, t: str) -> str:
-                try:
-                    return await _encode(v, entity_type=t)
-                except TypeError:
-                    return await _encode(v)
+                async with _semaphore:
+                    try:
+                        return await _encode(v, entity_type=t)
+                    except TypeError:
+                        return await _encode(v)
 
             tokens = await asyncio.gather(
                 *[_enc(span.original_value, span.entity_type) for span in resolved]
@@ -550,7 +559,11 @@ class PresidioScanner:
         context: Optional[str] = None,
         aggressive: bool = False,
     ) -> List[Dict]:
-        """Async version of ``scan_and_return_entities``."""
+        """Async version of ``scan_and_return_entities``.
+
+        Refactored to use the Span-First accumulation pattern for safety.
+        Uses asyncio.Semaphore to cap encoding concurrency at 50.
+        """
         if not text or not isinstance(text, str):
             return []
 
@@ -560,44 +573,57 @@ class PresidioScanner:
             _encode = aencode
         else:
             _encode = encode_fn
-            
+
         boost = self._resolve_boost(context)
         all_entities: List[Dict] = []
-
-        remaining = text
 
         # ── Freeze locale from ORIGINAL text before any mutation ───────────
         locale = self.lang_resolver.resolve(text)
 
+        # ── Span-accumulation phase (mirrors ascan_and_tokenize) ───────────
+        all_spans: List[Span] = []
+
         if "dlp" in pipeline:
-            _, tier0 = self._tier0_dlp_heuristic(remaining, lambda x: x, confidence_threshold)
-            if tier0:
-                vals = [(e["value"], e.get("type", "UNKNOWN")) for e in tier0]
-                async def _enc(v, t):
-                    try: return await _encode(v, entity_type=t)
-                    except TypeError: return await _encode(v)
-                tokens = await asyncio.gather(*[_enc(v, t) for v, t in vals])
-                for i, t in enumerate(tokens):
-                    tier0[i]["masked_value"] = t
-                all_entities.extend(tier0)
-                tier0_sorted = sorted(tier0, key=lambda x: x["start"], reverse=True)
-                for e in tier0_sorted:
-                    remaining = remaining[:e["start"]] + e["masked_value"] + remaining[e["end"]:]
+            spans = await asyncio.to_thread(
+                self._tier0_collect_spans, text, confidence_threshold, locale
+            )
+            all_spans.extend(spans)
 
         if "regex" in pipeline or "checksum" in pipeline:
-            _, tier1 = self._tier1_regex(remaining, lambda x: x, boost, aggressive, confidence_threshold)
-            if tier1:
-                vals = [(e["value"], e.get("type", "UNKNOWN")) for e in tier1]
-                async def _enc(v, t):
-                    try: return await _encode(v, entity_type=t)
-                    except TypeError: return await _encode(v)
-                tokens = await asyncio.gather(*[_enc(v, t) for v, t in vals])
-                for i, t in enumerate(tokens):
-                    tier1[i]["masked_value"] = t
-                all_entities.extend(tier1)
-                tier1_sorted = sorted(tier1, key=lambda x: x["start"], reverse=True)
-                for e in tier1_sorted:
-                    remaining = remaining[:e["start"]] + e["masked_value"] + remaining[e["end"]:]
+            spans = await asyncio.to_thread(
+                self._tier1_collect_spans, text, boost, aggressive, confidence_threshold
+            )
+            all_spans.extend(spans)
+
+        # ── Resolve overlaps; encode with bounded concurrency ─────────────
+        resolved = resolve_overlaps(all_spans)
+        if resolved:
+            _semaphore = asyncio.Semaphore(50)
+
+            async def _enc(v: str, t: str) -> str:
+                async with _semaphore:
+                    try:
+                        return await _encode(v, entity_type=t)
+                    except TypeError:
+                        return await _encode(v)
+
+            tokens = await asyncio.gather(
+                *[_enc(span.original_value, span.entity_type) for span in resolved]
+            )
+            for span, token in zip(resolved, tokens):
+                span.masked_value = token
+
+        for span in resolved:
+            all_entities.append({
+                "start": span.start, "end": span.end, "type": span.entity_type,
+                "value": span.original_value, "method": span.method,
+                "confidence": span.confidence, "masked_value": span.masked_value,
+                "language": span.language,
+                "rule_id": span.rule_id,
+                "compliance_scope": list(span.compliance_scope) if span.compliance_scope else [],
+            })
+
+        remaining = reconstruct(text, resolved)
 
         if "nlp" in pipeline:
             _, tier2 = await self._atier2_nlp(

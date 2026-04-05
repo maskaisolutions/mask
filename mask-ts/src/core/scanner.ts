@@ -132,7 +132,8 @@ export class BaseScanner {
           if (conf >= confidenceThreshold) {
             spans.push({ start: m.index, end: m.index + matchedStr.length,
               entityType: typeTag, originalValue: matchedStr,
-              confidence: conf, method: 'dlp_heuristic', language: detectedLanguage });
+              confidence: conf, method: 'dlp_heuristic', language: detectedLanguage,
+              ruleId: descriptor.ruleId, complianceScope: descriptor.complianceScope });
           }
         }
       }

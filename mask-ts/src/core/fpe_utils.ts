@@ -11,14 +11,15 @@
  */
 export const TOKEN_PATTERN = new RegExp(
   "tkn-[a-f0-9]{8,64}@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}" +            // Email
-  "|\\+[1-9]\\d{0,3}-555-\\d{7}" +                           // Phone
-  "|000-00-\\d{4}" +                            // SSN
-  "|4000-0000-0000-\\d{4}" +                    // CC
-  "|000000\\d{3}" +                             // Routing
-  "|000\\d{5}[A-Z]" +                           // Spanish DNI token
-  "|[A-Z]{2}00[A-F0-9]{4,16}" +                // IBAN token
-  "|<(?:PER|LOC|ORG):[^>]+>" +                 // NLP Semantic tokens
-  "|\\[TKN-[a-f0-9]{8,64}\\]",                  // Opaque
+  "|\\+[1-9]\\d{0,3}-555-\\d{7}" +                                 // Phone
+  "|000-00-\\d{4}" +                                               // SSN
+  "|4000-0000-0000-\\d{4}" +                                       // CC
+  "|000000\\d{3}" +                                                // Routing
+  "|000\\d{5}[A-Z]" +                                              // Spanish DNI token
+  "|[A-Z]{2}00[A-F0-9]{4,16}" +                                    // IBAN token
+  "|<(?:PER|LOC|ORG):[^>]+>" +                                     // NLP Semantic tokens V4
+  "|\\b[A-Z][a-zA-Z, ]+-[0-9]{3,4}\\b" +                           // Bijective Name/Loc
+  "|\\\\[TKN-[a-f0-9]{8,64}\\\\]",                                 // Opaque
   "g"
 );
 
@@ -77,6 +78,15 @@ export function looksLikeToken(value: string | any): boolean {
   // Opaque fallback tokens: [TKN-<hex>]
   if (v.startsWith("[TKN-") && v.endsWith("]")) {
     return true;
+  }
+  
+  // Bijective Name: Word Word-1234
+  if (v.includes("-") && v.length >= 6) {
+    const parts = v.split("-");
+    const tag = parts[parts.length - 1];
+    if (tag.length === 4 && /^\d+$/.test(tag)) {
+        return true;
+    }
   }
 
   return false;

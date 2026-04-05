@@ -21,7 +21,7 @@ Algorithm
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import FrozenSet, List, Optional
 
 
 @dataclass(order=False)
@@ -35,6 +35,10 @@ class Span:
     confidence: float
     method: str                          # "dlp_heuristic" | "regex" | "nlp"
     language: Optional[str] = field(default=None)
+
+    # Audit trail fields (DSPM compliance)
+    rule_id: Optional[str] = field(default=None)          # e.g. "MASK-FIN-001"
+    compliance_scope: Optional[FrozenSet[str]] = field(default=None)  # e.g. {"PCI-DSS", "HIPAA"}
 
     # Filled in by the caller after encode_fn is applied
     masked_value: Optional[str] = field(default=None)

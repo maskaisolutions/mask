@@ -46,6 +46,8 @@ class PatternDescriptor(NamedTuple):
     validator_tag: Optional[str]      # e.g. "luhn", "tcid", "iban", "saudi_nid"
     is_high_entropy: bool             # Should we always run this even in other locales?
     supported_locales: List[str]      # Which locales is this specific to? ["*"] for global.
+    rule_id: str                      # Unique ID for compliance audit trail (e.g. "MASK-FIN-001")
+    compliance_scope: FrozenSet[str]  # Compliance frameworks: {"PCI-DSS", "HIPAA", "GDPR", ...}
 
 
 # ── Locale-specific auxiliary patterns ────────────────────────────────────────
@@ -239,6 +241,9 @@ class DLPPatternRegistry:
                 0.95,
                 SensitiveCategory.FINANCIAL,
                 "ssn_area",
+                None, None,  # entropy, locales (defaults)
+                "MASK-FIN-001",
+                frozenset({"PCI-DSS", "HIPAA", "SOC2"}),
             ),
             (
                 "CREDIT_CARD_NUMBER",
@@ -247,6 +252,9 @@ class DLPPatternRegistry:
                 0.97,
                 SensitiveCategory.FINANCIAL,
                 "luhn",
+                None, None,
+                "MASK-FIN-002",
+                frozenset({"PCI-DSS"}),
             ),
             (
                 "INTL_BANK_IBAN",
@@ -255,6 +263,9 @@ class DLPPatternRegistry:
                 0.96,
                 SensitiveCategory.FINANCIAL,
                 "iban",
+                None, None,
+                "MASK-FIN-003",
+                frozenset({"PCI-DSS", "GDPR"}),
             ),
             (
                 "CRYPTO_BTC",
@@ -263,6 +274,9 @@ class DLPPatternRegistry:
                 0.94,
                 SensitiveCategory.FINANCIAL,
                 "btc_format",
+                None, None,
+                "MASK-FIN-004",
+                frozenset({"SOC2"}),
             ),
             (
                 "CRYPTO_ETH",
@@ -271,6 +285,9 @@ class DLPPatternRegistry:
                 0.93,
                 SensitiveCategory.FINANCIAL,
                 None,
+                None, None,
+                "MASK-FIN-005",
+                frozenset({"SOC2"}),
             ),
             (
                 "US_ABA_ROUTING",
@@ -279,6 +296,9 @@ class DLPPatternRegistry:
                 0.88,
                 SensitiveCategory.FINANCIAL,
                 "aba_check",
+                None, None,
+                "MASK-FIN-006",
+                frozenset({"PCI-DSS", "SOC2"}),
             ),
             (
                 "BANK_ACCT_NUM",
@@ -287,6 +307,9 @@ class DLPPatternRegistry:
                 0.50,
                 SensitiveCategory.FINANCIAL,
                 "luhn_soft",
+                None, None,
+                "MASK-FIN-007",
+                frozenset({"PCI-DSS", "SOC2"}),
             ),
             (
                 "ES_CCC",
@@ -297,6 +320,8 @@ class DLPPatternRegistry:
                 "es_ccc",
                 True,
                 ["*", "es"],
+                "MASK-FIN-008",
+                frozenset({"GDPR"}),
             ),
             (
                 "SWIFT_BIC",
@@ -305,6 +330,9 @@ class DLPPatternRegistry:
                 0.60,
                 SensitiveCategory.FINANCIAL,
                 None,
+                None, None,
+                "MASK-FIN-009",
+                frozenset({"PCI-DSS"}),
             ),
 
             # ── CONTACT ───────────────────────────────────────────────────
@@ -315,6 +343,9 @@ class DLPPatternRegistry:
                 0.99,
                 SensitiveCategory.CONTACT,
                 None,
+                None, None,
+                "MASK-CTX-001",
+                frozenset({"GDPR", "HIPAA", "SOC2"}),
             ),
             (
                 "PHONE_NUM",
@@ -323,14 +354,20 @@ class DLPPatternRegistry:
                 0.80,
                 SensitiveCategory.CONTACT,
                 None,
+                None, None,
+                "MASK-CTX-002",
+                frozenset({"GDPR", "HIPAA", "SOC2"}),
             ),
             (
                 "PHONE_NUM_INTL",
                 r"(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)",
                 frozenset({"phone", "call", "mobile", "tel"}),
-                0.80,  # Lowered from 0.93
+                0.80,
                 SensitiveCategory.CONTACT,
                 None,
+                None, None,
+                "MASK-CTX-003",
+                frozenset({"GDPR", "SOC2"}),
             ),
             (
                 "IPV4_ADDR",
@@ -339,6 +376,9 @@ class DLPPatternRegistry:
                 0.94,
                 SensitiveCategory.CONTACT,
                 "ipv4",
+                None, None,
+                "MASK-CTX-004",
+                frozenset({"GDPR", "SOC2"}),
             ),
             (
                 "IPV6_ADDR",
@@ -347,6 +387,9 @@ class DLPPatternRegistry:
                 0.93,
                 SensitiveCategory.CONTACT,
                 None,
+                None, None,
+                "MASK-CTX-005",
+                frozenset({"GDPR", "SOC2"}),
             ),
             (
                 "HW_MAC_ADDR",
@@ -355,6 +398,9 @@ class DLPPatternRegistry:
                 0.91,
                 SensitiveCategory.CONTACT,
                 None,
+                None, None,
+                "MASK-CTX-006",
+                frozenset({"SOC2"}),
             ),
 
             # ── PERSONAL ──────────────────────────────────────────────────
@@ -365,6 +411,9 @@ class DLPPatternRegistry:
                 0.88,
                 SensitiveCategory.PERSONAL,
                 None,
+                None, None,
+                "MASK-PER-001",
+                frozenset({"GDPR", "HIPAA"}),
             ),
             (
                 "US_DRIVERS_LIC",
@@ -373,6 +422,9 @@ class DLPPatternRegistry:
                 0.55,
                 SensitiveCategory.PERSONAL,
                 None,
+                None, None,
+                "MASK-PER-002",
+                frozenset({"GDPR", "SOC2"}),
             ),
             (
                 "US_PASSPORT_NUM",
@@ -381,6 +433,9 @@ class DLPPatternRegistry:
                 0.87,
                 SensitiveCategory.PERSONAL,
                 None,
+                None, None,
+                "MASK-PER-003",
+                frozenset({"GDPR", "SOC2"}),
             ),
 
             # ── VEHICLE ───────────────────────────────────────────────────
@@ -391,6 +446,9 @@ class DLPPatternRegistry:
                 0.92,
                 SensitiveCategory.VEHICLE,
                 "vin_format",
+                None, None,
+                "MASK-VEH-001",
+                frozenset({"SOC2"}),
             ),
             (
                 "VEHICLE_PLATE",
@@ -399,6 +457,9 @@ class DLPPatternRegistry:
                 0.45,
                 SensitiveCategory.VEHICLE,
                 None,
+                None, None,
+                "MASK-VEH-002",
+                frozenset({"SOC2"}),
             ),
 
             # ── HEALTHCARE ────────────────────────────────────────────────
@@ -409,6 +470,9 @@ class DLPPatternRegistry:
                 0.96,
                 SensitiveCategory.HEALTHCARE,
                 None,
+                None, None,
+                "MASK-HLT-001",
+                frozenset({"HIPAA"}),
             ),
             (
                 "US_MEDICARE_ID",
@@ -417,6 +481,9 @@ class DLPPatternRegistry:
                 0.91,
                 SensitiveCategory.HEALTHCARE,
                 None,
+                None, None,
+                "MASK-HLT-002",
+                frozenset({"HIPAA"}),
             ),
             (
                 "US_DEA_NUM",
@@ -425,6 +492,9 @@ class DLPPatternRegistry:
                 0.89,
                 SensitiveCategory.HEALTHCARE,
                 None,
+                None, None,
+                "MASK-HLT-003",
+                frozenset({"HIPAA"}),
             ),
             (
                 "US_NPI_NUM",
@@ -433,6 +503,9 @@ class DLPPatternRegistry:
                 0.87,
                 SensitiveCategory.HEALTHCARE,
                 None,
+                None, None,
+                "MASK-HLT-004",
+                frozenset({"HIPAA"}),
             ),
 
             # ── IDENTITY_US ───────────────────────────────────────────────
@@ -443,6 +516,9 @@ class DLPPatternRegistry:
                 0.89,
                 SensitiveCategory.IDENTITY_US,
                 None,
+                None, None,
+                "MASK-IDU-001",
+                frozenset({"SOC2"}),
             ),
 
             # ── IDENTITY_INTL ─────────────────────────────────────────────
@@ -453,6 +529,9 @@ class DLPPatternRegistry:
                 0.90,
                 SensitiveCategory.IDENTITY_INTL,
                 "uk_nino",
+                None, None,
+                "MASK-IDI-001",
+                frozenset({"GDPR"}),
             ),
             (
                 "CA_SOCIAL_INS",
@@ -461,6 +540,9 @@ class DLPPatternRegistry:
                 0.89,
                 SensitiveCategory.IDENTITY_INTL,
                 "ca_sin",
+                None, None,
+                "MASK-IDI-002",
+                frozenset({"SOC2"}),
             ),
             (
                 "ES_DNI",
@@ -471,6 +553,8 @@ class DLPPatternRegistry:
                 "es_id",
                 True,
                 ["*", "es"],
+                "MASK-IDI-003",
+                frozenset({"GDPR"}),
             ),
             (
                 "ES_NUSS",
@@ -481,6 +565,8 @@ class DLPPatternRegistry:
                 "es_nuss",
                 True,
                 ["*", "es"],
+                "MASK-IDI-004",
+                frozenset({"GDPR"}),
             ),
 
             # ── CORPORATE ─────────────────────────────────────────────────
@@ -491,16 +577,31 @@ class DLPPatternRegistry:
                 0.55,
                 SensitiveCategory.CORPORATE,
                 None,
+                None, None,
+                "MASK-CRP-001",
+                frozenset({"SOC2", "GDPR"}),
             ),
         ]
 
         for entry in raw:
-            # Handle entries with or without explicit locale/entropy (backward compatibility for build logic)
-            if len(entry) == 8:
+            # Handle entries with or without explicit locale/entropy/audit (backward compatibility)
+            if len(entry) == 10:
+                type_name, regex_str, terms, risk, cat, vtag, entropy, locales, rule_id, compliance = entry
+            elif len(entry) == 8:
                 type_name, regex_str, terms, risk, cat, vtag, entropy, locales = entry
+                rule_id = f"MASK-{cat.value[:3]}-{type_name}"
+                compliance = frozenset()
             else:
                 type_name, regex_str, terms, risk, cat, vtag = entry
                 entropy = True if vtag else False
+                locales = ["*"]
+                rule_id = f"MASK-{cat.value[:3]}-{type_name}"
+                compliance = frozenset()
+
+            # Handle None sentinel for entropy/locales in 10-tuple entries
+            if entropy is None:
+                entropy = True if vtag else False
+            if locales is None:
                 locales = ["*"]
 
             if restrict is not None and cat not in restrict:
@@ -519,4 +620,6 @@ class DLPPatternRegistry:
                 validator_tag=vtag,
                 is_high_entropy=entropy,
                 supported_locales=locales,
+                rule_id=rule_id,
+                compliance_scope=compliance if isinstance(compliance, frozenset) else frozenset(compliance),
             )

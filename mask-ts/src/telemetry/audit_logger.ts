@@ -200,7 +200,9 @@ export class AuditLogger {
             this._bufferFullWarned = false;
 
             for (const evt of events) {
-                console.info(JSON.stringify(evt));
+                // Use a replacer to handle BigInt values which are not JSON-serializable by default
+                const json = JSON.stringify(evt, (_, v) => typeof v === 'bigint' ? v.toString() : v);
+                console.info(json);
             }
         } finally {
             this._isFlushing = false;

@@ -10,6 +10,14 @@ import * as crypto from 'crypto';
 import { config } from '../config';
 import { getKeyProvider } from './key_provider';
 import { MaskSecurityError } from './exceptions';
+import {
+  FIRST_NAMES as _BIJECTIVE_NAMES,
+  CONNECTORS as _BIJECTIVE_CONNECTORS,
+  SURNAME_ROOTS as _BIJECTIVE_ROOTS,
+  SURNAME_SUFFIXES as _BIJECTIVE_SUFFIXES,
+  SYLLABLES as _BIJECTIVE_SYLLABLES
+} from './synthesisLibrary';
+
 
 // Master key management
 
@@ -71,39 +79,165 @@ async function _hmacHex(plaintext: string, n: number = 8): Promise<string> {
   return digest.slice(0, n);
 }
 
-/** Return *n* deterministic decimal digits derived from HMAC(key, plaintext). */
-async function _hmacDigits(plaintext: string, n: number, offset: number = 0): Promise<string> {
+/**
+ * Return a deterministic 128-bit BigInt from HMAC(key, plaintext).
+ *
+ * Uses the first 16 bytes (128 bits) of the SHA-256 HMAC digest,
+ * providing a namespace of 2^128 (~3.4 × 10^38). This replaces the
+ * old nibble-by-nibble modulo-10 approach which suffered from severe
+ * distribution bias in short fields (3-4 digits).
+ */
+async function _hmacInt(plaintext: string): Promise<bigint> {
   const masterKey = await _getMasterKey();
-  const digest = crypto
+  const raw = crypto
     .createHmac('sha256', masterKey)
     .update(plaintext, 'utf-8')
-    .digest('hex');
-
-  const result: string[] = [];
-  for (let i = offset; i < digest.length; i++) {
-    const ch = digest[i];
-    result.push((parseInt(ch, 16) % 10).toString());
-    if (result.length === n) break;
+    .digest();
+  // Read first 16 bytes as a big-endian unsigned integer
+  let result = 0n;
+  for (let i = 0; i < 16; i++) {
+    result = (result << 8n) | BigInt(raw[i]);
   }
-
-  while (result.length < n) {
-    result.push("0");
-  }
-  return result.join("");
+  return result;
 }
 
-// Public API
+/**
+ * Return *n* deterministic decimal digits from HMAC(key, plaintext).
+ *
+ * Uses full-integer division of a 128-bit HMAC-derived seed instead of
+ * per-nibble modulo-10, which eliminates the distribution bias that
+ * caused collisions in short numeric fields (routing numbers, SSN
+ * suffixes). The offset parameter salts the input to derive
+ * independent digit sequences from the same plaintext.
+ */
+async function _hmacDigits(plaintext: string, n: number, offset: number = 0): Promise<string> {
+  const salted = offset ? `${plaintext}::${offset}` : plaintext;
+  const seed = await _hmacInt(salted);
+  const modulus = 10n ** BigInt(n);
+  return (seed % modulus).toString().padStart(n, '0');
+}
 
-// Dictionary for Semantic NLP Faker Generation
-const _FIRST_NAMES = ["Taylor", "Jordan", "Casey", "Morgan", "Riley", "Avery", "Rowan", "Quinn", "Charlie", "Peyton", "Blake", "Dakota", "Reese", "Skyler", "Finley", "Eden", "Harley", "Rory", "Emerson", "Remi"];
-const _LAST_NAMES = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"];
-const _CITIES = ["London", "Paris", "Berlin", "Tokyo", "Rome", "Madrid", "Vienna", "Sydney", "Toronto", "Chicago", "Seattle", "Austin", "Boston", "Denver", "Dallas", "Miami", "Seoul", "Dubai", "Mumbai", "Cairo"];
+// ── Bijective Synthesis Engine ─────────────────────────────────────────────
 
-/** Return a deterministic item from an array. */
+export class FF1 {
+  /** NIST SP 800-38G FF1 implementation (simplified for 64-bit domains). */
+  constructor(private key: Buffer, private tweak: Buffer) {}
+
+  encrypt(n: bigint): bigint {
+    /** Encrypts 64-bit bigint n using FF1 (10 rounds). */
+    let A = n >> 32n;
+    let B = n & 0xFFFFFFFFn;
+    const radix = 2n ** 32n;
+
+    for (let i = 0; i < 10; i++) {
+      const tweakInfoBuffer = Buffer.alloc(8);
+      tweakInfoBuffer.writeUInt32BE(i, 0);
+      tweakInfoBuffer.writeUInt32BE(Number(B), 4);
+      const tweakInfoCombined = Buffer.concat([this.tweak, tweakInfoBuffer]);
+
+      const h = crypto.createHmac('sha256', this.key)
+        .update(tweakInfoCombined)
+        .digest();
+      
+      const roundVal = BigInt(h.readUInt32BE(0));
+
+      const Anext = B;
+      const Bnext = (A + roundVal) % radix;
+      A = Anext;
+      B = Bnext;
+    }
+
+    return (A << 32n) | B;
+  }
+
+  decrypt(n: bigint): bigint {
+    /** Decrypts 64-bit bigint n using FF1 (10 rounds in reverse). */
+    let A = n >> 32n;
+    let B = n & 0xFFFFFFFFn;
+    const radix = 2n ** 32n;
+
+    for (let i = 9; i >= 0; i--) {
+      const tweakInfoBuffer = Buffer.alloc(8);
+      tweakInfoBuffer.writeUInt32BE(i, 0);
+      tweakInfoBuffer.writeUInt32BE(Number(A), 4);
+      const tweakInfoCombined = Buffer.concat([this.tweak, tweakInfoBuffer]);
+
+      const h = crypto.createHmac('sha256', this.key)
+        .update(tweakInfoCombined)
+        .digest();
+      
+      const roundVal = BigInt(h.readUInt32BE(0));
+
+      const Bprev = A;
+      const Aprev = (B - roundVal + radix) % radix;
+      A = Aprev;
+      B = Bprev;
+    }
+
+    return (A << 32n) | B;
+  }
+}
+
+async function _getBijectiveTweak(): Promise<Buffer> {
+  const masterKey = await _getMasterKey();
+  let base = config.MASK_TENANT_ID;
+  if (config.MASK_SALT_ROTATION !== 'NONE') {
+    const now = new Date();
+    if (config.MASK_SALT_ROTATION === 'MONTHLY') {
+      base += `-${now.getUTCFullYear()}-${now.getUTCMonth() + 1}`;
+    } else if (config.MASK_SALT_ROTATION === 'YEARLY') {
+      base += `-${now.getUTCFullYear()}`;
+    }
+  }
+  return crypto.createHmac('sha256', masterKey).update(base, 'utf-8').digest();
+}
+
+function _renderBijectivePerson(bits: bigint): string {
+  /** Render a 64-bit cipher into a human-readable name (Bijective Synthesis). */
+  const firstIdx = Number(bits & 0x7FFn);          // 11 bits (2048)
+  const connIdx = Number((bits >> 11n) & 0x3Fn);    // 6 bits (64)
+  const rootIdx = Number((bits >> 17n) & 0xFFFn);    // 12 bits (4096)
+  const suffixIdx = Number((bits >> 29n) & 0x1FFn); // 9 bits (512)
+  const tag = Number((bits >> 38n) & 0x3FFFn);      // 14 bits (16384)
+  const formatIdx = Number((bits >> 52n) & 0xFn);   // 4 bits (16)
+
+  const first = _BIJECTIVE_NAMES[firstIdx % _BIJECTIVE_NAMES.length];
+  const conn = _BIJECTIVE_CONNECTORS[connIdx % _BIJECTIVE_CONNECTORS.length];
+  const root = _BIJECTIVE_ROOTS[rootIdx % _BIJECTIVE_ROOTS.length];
+  const suffix = _BIJECTIVE_SUFFIXES[suffixIdx % _BIJECTIVE_SUFFIXES.length];
+  const surname = `${root}${suffix}`;
+  const numeric = tag % 10000;
+
+  const paddedNumeric = numeric.toString().padStart(4, '0');
+
+  // Format Shuffle
+  if (formatIdx === 0) return `${first} ${conn} ${surname}-${paddedNumeric}`;
+  if (formatIdx === 1) return `${surname}, ${first}-${paddedNumeric}`;
+  if (formatIdx === 2) return `${first[0]}. ${surname}-${paddedNumeric}`;
+  if (formatIdx === 3) return `${first} ${surname}-${paddedNumeric}`;
+  
+  return `${first} ${surname}-${paddedNumeric}`;
+}
+
+function _renderBijectiveLocation(bits: bigint): string {
+  /** Render a 64-bit cipher into a bijective location name. */
+  const s1 = Number(bits & 0x3FFn);
+  const s2 = Number((bits >> 10n) & 0x3FFn);
+  const s3 = Number((bits >> 20n) & 0x3FFn);
+  const tag = Number((bits >> 30n) & 0xFFFn);
+
+  const city = `${_BIJECTIVE_SYLLABLES[s1 % 1000]}${_BIJECTIVE_SYLLABLES[s2 % 1000].toLowerCase()}${_BIJECTIVE_SYLLABLES[s3 % 1000].toLowerCase()}`;
+  return `${city}-${tag.toString().padStart(3, '0')}`;
+}
+
+// ── Legacy Semantic Token Banks (Redirected in Bijective Mode) ──────────────
+// Seed lists are imported from semanticBanks.ts, maintaining architecture
+// parity with python/semantic_banks.py
+
+/** Return a deterministic item from an array using full 128-bit entropy. */
 async function _pickFromArray(plaintext: string, array: string[]): Promise<string> {
-   const digits = await _hmacDigits(plaintext, 8);
-   const num = parseInt(digits, 10);
-   return array[num % array.length];
+   const seed = await _hmacInt(plaintext);
+   return array[Number(seed % BigInt(array.length))];
 }
 
 /** Compute Luhn check digit */
@@ -186,17 +320,31 @@ export async function generateFPEToken(rawText: string, entityType: string = 'UN
   }
 
   if (type === "PERSON" || type === "PERSON_NAME") {
-      const f = await _pickFromArray(text, _FIRST_NAMES);
-      const l = await _pickFromArray(text + "last", _LAST_NAMES);
-      return `<PER:${f}_${l}>`;
+      if (config.MASK_BIJECTIVE_MODE) {
+        const canonical = text.toLowerCase().trim();
+        const hash = crypto.createHash('sha256').update(canonical, 'utf-8').digest();
+        const inputInt = hash.readBigUInt64BE(0);
+        const masterKey = await _getMasterKey();
+        const engine = new FF1(masterKey.slice(0, 16), await _getBijectiveTweak());
+        const cipher = engine.encrypt(inputInt);
+        return _renderBijectivePerson(cipher);
+      }
+      return `[TKN-PERSON-${await _hmacHex(text)}]`;
   }
   if (type === "LOCATION" || type === "PHYS_ADDRESS") {
-      const c = await _pickFromArray(text, _CITIES);
-      return `<LOC:${c}>`;
+      if (config.MASK_BIJECTIVE_MODE) {
+        const canonical = text.toLowerCase().trim();
+        const hash = crypto.createHash('sha256').update(canonical, 'utf-8').digest();
+        const inputInt = hash.readBigUInt64BE(0);
+        const masterKey = await _getMasterKey();
+        const engine = new FF1(masterKey.slice(0, 16), await _getBijectiveTweak());
+        const cipher = engine.encrypt(inputInt);
+        return _renderBijectiveLocation(cipher);
+      }
+      return `[TKN-LOC-${await _hmacHex(text)}]`;
   }
   if (type === "ORGANIZATION") {
-      const c = await _pickFromArray(text, _LAST_NAMES);
-      return `<ORG:${c}_Inc>`;
+      return `[TKN-ORG-${await _hmacHex(text)}]`;
   }
 
   return `[TKN-${await _hmacHex(text)}]`;
