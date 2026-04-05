@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0]
+
+### Added
+- **Spanish Identity Checksum Generation:** Expanded `generate_fpe_token` to accept matching criteria for `ES_ID` and `ES_DNI`, guaranteeing realistic, synthetic Spanish ID outputs with valid Mod-23 checksums.
+- **International Dialer Resolution:** Included explicit international prefix tracking to `_PHONE_RE` (`^\+\d{2,3}[\s\-.]?\d{3}`) strictly to support `+34` native formatting for Spanish phone tokens.
+
+### Changed
+- **Python Async Deadlocks Fixed:** Offloaded heavy detection workloads (Tier 0 & Tier 1) in async methods directly into `asyncio.to_thread` pools to prevent long-running Mega-Regex passes from blocking the master event loop during NLP peaks.
+- **TypeScript Promise Storm Mitigation:** Handled a V8 resource exhaustion vector by imposing an active `CHUNK_SIZE=50` limit on simultaneous asynchronous tokenization requests hitting the cryptography vault array.
+- **Regex Compiler Flag Sandbox:** Fully partitioned `DLPPatternRegistry` compilation into distinct Case-Sensitive and Case-Insensitive fallback buckets, resolving a dangerous compiler bleeding edge-case where a single `(?i)` flag would unilaterally override strict checksum validations across the entire category grouping. 
+
+### Fixed
+- **Python Async Data Corruption:** Hotfixed an index calculation mismatch inside `ascan_and_tokenize` where right-to-left pointer updates failed to mutate original index lists, directly leading to incorrectly segmented synthetic tokens.
+- **Locale Handoff Drift:** Locked down native language detection immediately to the top of the event chain to resolve downstream NLP classification errors introduced post-tokenization. 
+- **Substring Boost Invalidation:** Re-configured the Context Proximity scoring matrices (`_resolve_boost`) using strict Regex `\b` word boundary logic, resolving aggressive false-positives triggered on internal string containment (e.g. "id" boosting adjacent triggers while naturally inside the word "provider").
+
 ## [3.4.0]
 
 ### Added
@@ -24,4 +40,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[3.5.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.5.0
 [3.4.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.4.0

@@ -136,6 +136,7 @@ class PresidioScanner:
         self,
         text: str,
         confidence_threshold: float,
+        locale: Optional[str] = None,
     ) -> List[Span]:
         """Run the DLP pattern registry using Category Mega-Regexes.
 
@@ -143,58 +144,65 @@ class PresidioScanner:
         here — all encoding and text reconstruction happens in one final pass
         after all tiers have collected their spans.
 
-        Uses pre-compiled per-category mega-regexes to scan the entire text
-        in O(text) per category instead of O(patterns × text).
+        Each category now returns a ``List[re.Pattern]`` (at most two: one
+        case-sensitive, one case-insensitive) so that flag bleed between
+        sub-groups is impossible.
+
+        ``locale`` may be pre-resolved by a caller (async path) to avoid
+        running language detection twice on a mutated text buffer.
         """
-        locale = self.lang_resolver.resolve(text)
+        if locale is None:
+            locale = self.lang_resolver.resolve(text)
         logger.debug("DLP language context: %s", locale)
 
         spans: List[Span] = []
+        # Returns Dict[cat_key, List[re.Pattern]] — at most 2 per category
         category_regexes = self.registry.get_category_regexes(locale=locale)
 
-        # Pass 1: Category Mega-Regexes (O(text) per category bucket)
-        for cat_key, mega_re in category_regexes.items():
-            for m in mega_re.finditer(text):
-                type_tag = m.lastgroup
-                if type_tag is None:
-                    continue
-                matched_str = m.group(0)
-                if looks_like_token(matched_str):
-                    continue
-                descriptor = self.registry.descriptor_for(type_tag)
-                if descriptor is None:
-                    continue
-                
-                validator_result = self.validation_engine.run(
-                    descriptor.validator_tag, matched_str
-                )
-                
-                # FUZZY FAIL-SAFE logic
-                if validator_result is False:
-                    if descriptor.is_high_entropy:
-                        conf = 0.85  # Higher than generic Phone (0.80)
-                    else:
+        # Pass 1: Category Mega-Regexes (O(text) per category/sub-group)
+        for cat_key, regex_list in category_regexes.items():
+            for mega_re in regex_list:
+                for m in mega_re.finditer(text):
+                    type_tag = m.lastgroup
+                    if type_tag is None:
                         continue
-                else:
-                    conf = _dlp_confidence_scorer.score(
-                        base_risk=descriptor.base_risk,
-                        match_start=m.start(),
-                        match_end=m.end(),
-                        full_text=text,
-                        proximity_terms=descriptor.proximity_terms,
-                        validator_passed=validator_result,
+                    matched_str = m.group(0)
+                    if looks_like_token(matched_str):
+                        continue
+                    descriptor = self.registry.descriptor_for(type_tag)
+                    if descriptor is None:
+                        continue
+
+                    validator_result = self.validation_engine.run(
+                        descriptor.validator_tag, matched_str
                     )
-                
-                if conf >= confidence_threshold:
-                    spans.append(Span(
-                        start=m.start(),
-                        end=m.end(),
-                        entity_type=type_tag,
-                        original_value=matched_str,
-                        confidence=conf,
-                        method="dlp_heuristic",
-                        language=locale,
-                    ))
+
+                    # FUZZY FAIL-SAFE logic
+                    if validator_result is False:
+                        if descriptor.is_high_entropy:
+                            conf = 0.85  # Higher than generic Phone (0.80)
+                        else:
+                            continue
+                    else:
+                        conf = _dlp_confidence_scorer.score(
+                            base_risk=descriptor.base_risk,
+                            match_start=m.start(),
+                            match_end=m.end(),
+                            full_text=text,
+                            proximity_terms=descriptor.proximity_terms,
+                            validator_passed=validator_result,
+                        )
+
+                    if conf >= confidence_threshold:
+                        spans.append(Span(
+                            start=m.start(),
+                            end=m.end(),
+                            entity_type=type_tag,
+                            original_value=matched_str,
+                            confidence=conf,
+                            method="dlp_heuristic",
+                            language=locale,
+                        ))
 
         # Pass 2: Locale-tuned name patterns (JIT — only for detected language)
         name_proximity = frozenset({"name", "contact", "person", "nom", "isim", "\u0627\u0633\u0645"})
@@ -338,15 +346,21 @@ class PresidioScanner:
     # Public API
 
     def _resolve_boost(self, context: Optional[str]) -> frozenset:
-        """Determine which entity types should get a confidence boost."""
+        """Determine which entity types should get a confidence boost.
+
+        Proximity terms are matched on whole-word boundaries only (``\\b``)
+        to prevent short terms such as ``"id"`` from matching inside unrelated
+        words like ``"hidden"`` or ``"provider"``.
+        """
         if not context:
             return frozenset()
-        lowered = context.lower()
-        # Scan registry descriptions to see if any proximity terms match the context
         boosted = set()
         for _, desc in self.registry.iter_descriptors():
-            if any(term in lowered for term in desc.proximity_terms):
-                boosted.add(desc.category.value.lower())
+            for term in desc.proximity_terms:
+                pattern = r"\b" + re.escape(term) + r"\b"
+                if re.search(pattern, context, re.IGNORECASE):
+                    boosted.add(desc.category.value.lower())
+                    break  # one term match is enough for this descriptor
         return frozenset(boosted)
 
     def scan_and_tokenize(
@@ -462,42 +476,68 @@ class PresidioScanner:
         aggressive: bool = False,
     ) -> str:
         """Native async version of ``scan_and_tokenize``.
-        
-        This method is non-blocking: it runs the Tier 2 NLP in a process pool
-        and waits for the result without blocking the asyncio event loop.
+
+        Non-blocking: heavy CPU span-collection is offloaded to a thread via
+        ``asyncio.to_thread`` so the event loop is never blocked by mega-regex
+        work.  The language locale is resolved *once* from the original text
+        and passed down to every tier to prevent NLP mis-classification after
+        tokens replace PII substrings.
         """
         if not text or not isinstance(text, str):
             return text
 
         pipeline = pipeline or ["dlp", "regex", "checksum", "nlp"]
-        
-        # Default to vault.aencode if not provided
+
         if encode_fn is None:
             from mask_privacy.core.vault import aencode
             _encode = aencode
         else:
             _encode = encode_fn
-            
+
         boost = self._resolve_boost(context)
 
-        # --- Tier 0: DLP Heuristic (sync, fast) ---
-        if "dlp" in pipeline:
-            # DLP tier uses sync encode via identity pass then async encode
-            _, dlp_entities = self._tier0_dlp_heuristic(text, lambda x: x, confidence_threshold)
-            if dlp_entities:
-                vals = [(e["value"], e.get("type", "UNKNOWN")) for e in dlp_entities]
-                async def _enc(v, t):
-                    try: return await _encode(v, entity_type=t)
-                    except TypeError: return await _encode(v)
-                tokens = await asyncio.gather(*[_enc(v, t) for v, t in vals])
-                dlp_entities.sort(key=lambda x: x.get("start", 0), reverse=True)
-                for i, e in enumerate(reversed(dlp_entities)):
-                    idx = len(dlp_entities) - 1 - i
-                    text = text[:dlp_entities[idx]["start"]] + tokens[idx] + text[dlp_entities[idx]["end"]:]
+        # ── Freeze locale from ORIGINAL text before any mutation ───────────
+        locale = self.lang_resolver.resolve(text)
 
-        # --- Tier 2: Probabilistic (on the *remaining* text) ---
+        # ── Span-accumulation phase (offloaded to thread pool) ────────────
+        all_spans: List[Span] = []
+
+        if "dlp" in pipeline:
+            spans = await asyncio.to_thread(
+                self._tier0_collect_spans, text, confidence_threshold, locale
+            )
+            all_spans.extend(spans)
+
+        if "regex" in pipeline or "checksum" in pipeline:
+            spans = await asyncio.to_thread(
+                self._tier1_collect_spans, text, boost, aggressive, confidence_threshold
+            )
+            all_spans.extend(spans)
+
+        # ── Resolve overlaps; encode all deterministic tokens in parallel ──
+        resolved = resolve_overlaps(all_spans)
+        if resolved:
+            async def _enc(v: str, t: str) -> str:
+                try:
+                    return await _encode(v, entity_type=t)
+                except TypeError:
+                    return await _encode(v)
+
+            tokens = await asyncio.gather(
+                *[_enc(span.original_value, span.entity_type) for span in resolved]
+            )
+            # Assign masked values BEFORE any reordering
+            for span, token in zip(resolved, tokens):
+                span.masked_value = token
+
+        # Single-pass string reconstruction (right-to-left, no offset drift)
+        text = reconstruct(text, resolved)
+
+        # ── Tier 2: Probabilistic NLP (on already-masked text) ───────────
         if "nlp" in pipeline:
-            text, _ = await self._atier2_nlp(text, _encode, boost, aggressive, confidence_threshold)
+            text, _ = await self._atier2_nlp(
+                text, _encode, boost, aggressive, confidence_threshold, locale=locale
+            )
 
         return text
 
@@ -525,6 +565,9 @@ class PresidioScanner:
         all_entities: List[Dict] = []
 
         remaining = text
+
+        # ── Freeze locale from ORIGINAL text before any mutation ───────────
+        locale = self.lang_resolver.resolve(text)
 
         if "dlp" in pipeline:
             _, tier0 = self._tier0_dlp_heuristic(remaining, lambda x: x, confidence_threshold)
@@ -557,7 +600,9 @@ class PresidioScanner:
                     remaining = remaining[:e["start"]] + e["masked_value"] + remaining[e["end"]:]
 
         if "nlp" in pipeline:
-            _, tier2 = await self._atier2_nlp(remaining, _encode, boost, aggressive, confidence_threshold)
+            _, tier2 = await self._atier2_nlp(
+                remaining, _encode, boost, aggressive, confidence_threshold, locale=locale
+            )
             all_entities.extend(tier2)
 
         return all_entities
@@ -569,8 +614,15 @@ class PresidioScanner:
         boost_entities: frozenset,
         aggressive: bool,
         confidence_threshold: float,
+        *,
+        locale: Optional[str] = None,
     ) -> tuple[str, List[Dict]]:
-        """Async version of _tier2_nlp that uses asyncio.wrap_future."""
+        """Async version of _tier2_nlp that uses asyncio.wrap_future.
+
+        ``locale`` should be the language tag resolved from the *original*
+        unmasked text.  If omitted it is inferred from ``text`` (which may
+        already be partially masked and therefore mis-classified).
+        """
         import asyncio
         from concurrent.futures import TimeoutError as FuturesTimeoutError
         from mask_privacy.core.exceptions import MaskNLPTimeout
@@ -578,7 +630,9 @@ class PresidioScanner:
         timeout = config.MASK_NLP_TIMEOUT_SECONDS
         entities: List[Dict] = []
 
-        lang = _dlp_lang_resolver.resolve(text)
+        # Use the pre-resolved locale; fall back to detecting from text only if
+        # no frozen locale was passed (e.g. direct callers of this method).
+        lang = locale if locale is not None else _dlp_lang_resolver.resolve(text)
         pool = _get_scanner_pool()
         future = pool.submit(_run_analyzer, text, self._supported_entities, lang)
         

@@ -75,6 +75,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _PHONE_RE = re.compile(
     r"^\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}$"
     r"|^\d{3}[\s\-.]?\d{4}$"
+    r"|^\+\d{2,3}[\s\-.]?\d{3}[\s\-.]?\d{3}[\s\-.]?\d{3,4}$"
 )
 _SSN_RE   = re.compile(r"^\d{3}-\d{2}-\d{4}$")
 _CC_RE    = re.compile(r"^(?:\d{4}[ \-]?){3}\d{4}$")
@@ -181,7 +182,7 @@ def generate_fpe_token(raw_text: str, entity_type: str = "UNKNOWN") -> str:
         country = text[:2].upper() if len(text) >= 2 and text[:2].isalpha() else "US"
         return f"{country}00{_hmac_hex(text, n=8).upper()}"
 
-    if type_ == "ES_DNI":
+    if type_ in ("ES_ID", "ES_DNI"):
         # Format: 000 + 5 digits + check letter
         digits = f"000{_hmac_digits(text, 5)}"
         return digits + _compute_es_id_check(int(digits))

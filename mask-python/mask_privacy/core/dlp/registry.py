@@ -96,8 +96,12 @@ class DLPPatternRegistry:
     ) -> None:
         self._catalogue: Dict[str, PatternDescriptor] = {}
         self._build_catalogue(load_groups)
-        # Pre-compiled category mega-regexes (built per locale)
-        self._locale_category_regexes: Dict[str, Dict[str, re.Pattern]] = {}
+        # Pre-compiled category mega-regexes (built per locale).
+        # Each category maps to a List of compiled patterns — at most two:
+        # index 0 = case-sensitive group, index 1 = case-insensitive group.
+        # Keeping them separate prevents IGNORECASE from bleeding across
+        # unrelated patterns compiled into the same alternation.
+        self._locale_category_regexes: Dict[str, Dict[str, List[re.Pattern]]] = {}
         self._locale_category_type_maps: Dict[str, Dict[str, List[str]]] = {}
         # We pre-compile only the "Global" and "Common" locales on start
         for loc in ["*", "en", "es"]:
@@ -114,10 +118,15 @@ class DLPPatternRegistry:
     def type_names(self) -> List[str]:
         return list(self._catalogue.keys())
 
-    def get_category_regexes(self, locale: str = "en") -> Dict[str, re.Pattern]:
+    def get_category_regexes(self, locale: str = "en") -> Dict[str, List[re.Pattern]]:
         """Return the pre-compiled per-category Mega-Regexes for a locale.
 
-        If the locale isn't targetized yet, it falls back to the common pool.
+        Returns a ``Dict[category_key, List[re.Pattern]]`` where each list
+        contains at most two entries: one for case-sensitive patterns and one
+        for case-insensitive patterns.  Keeping them separate prevents
+        IGNORECASE from bleeding across patterns that must stay case-sensitive.
+
+        If the locale isn't pre-compiled yet, it is built on demand.
         """
         if locale not in self._locale_category_regexes:
             self._compile_for_locale(locale)
@@ -145,14 +154,21 @@ class DLPPatternRegistry:
     # ── internal mega-regex compiler ──────────────────────────────────────
 
     def _compile_for_locale(self, locale: str) -> None:
-        """Build one compiled regex per SensitiveCategory for a specific locale.
+        """Build compiled regexes per SensitiveCategory for a specific locale.
 
-        Includes all Priority 0 (Global) patterns plus patterns matching the locale.
+        To prevent case-flag bleed, each category bucket is split into two
+        independent sub-groups before combination:
+
+          - **case-sensitive** patterns (no IGNORECASE flag)
+          - **case-insensitive** patterns (have IGNORECASE flag)
+
+        Each sub-group is compiled as its own alternation regex, and both are
+        stored in a ``List[re.Pattern]``.  The scanner iterates the list so
+        that the correct flags are always applied per sub-group.
         """
-        # Filter patterns for this locale
+        # Filter patterns valid for this locale
         locale_pool: Dict[str, List[tuple]] = {}
         for type_name, desc in self._catalogue.items():
-            # Include if: (Global) OR (Matches Locale)
             if "*" in desc.supported_locales or locale in desc.supported_locales:
                 cat_key = desc.category.value
                 locale_pool.setdefault(cat_key, []).append((type_name, desc))
@@ -161,7 +177,7 @@ class DLPPatternRegistry:
         self._locale_category_type_maps[locale] = {}
 
         for cat_key, entries in locale_pool.items():
-            # Sort by specificity (Length + Validator)
+            # Sort by specificity (validator-backed first, then by pattern length)
             entries.sort(
                 key=lambda e: (
                     0 if e[1].validator_tag else 1,
@@ -169,27 +185,37 @@ class DLPPatternRegistry:
                 )
             )
 
-            parts: List[str] = []
+            # Partition into case-sensitive and case-insensitive sub-groups
+            cs_parts: List[str] = []   # case-sensitive
+            ci_parts: List[str] = []   # case-insensitive
             type_order: List[str] = []
-            bucket_flags = 0
+
             for type_name, desc in entries:
                 raw = desc.compiled_re.pattern
+                named = f"(?P<{type_name}>{raw})"
                 if desc.compiled_re.flags & re.IGNORECASE:
-                    bucket_flags |= re.IGNORECASE
-                parts.append(f"(?P<{type_name}>{raw})")
+                    ci_parts.append(named)
+                else:
+                    cs_parts.append(named)
                 type_order.append(type_name)
 
-            combined = "|".join(parts)
-            try:
-                self._locale_category_regexes[locale][cat_key] = re.compile(combined, flags=bucket_flags)
+            compiled: List[re.Pattern] = []
+            for group_parts, flags in ((cs_parts, 0), (ci_parts, re.IGNORECASE)):
+                if not group_parts:
+                    continue
+                combined = "|".join(group_parts)
+                try:
+                    compiled.append(re.compile(combined, flags=flags))
+                except re.error as exc:
+                    _log.error(
+                        "Failed to compile %s category regex for '%s' (locale '%s'): %s",
+                        "case-insensitive" if flags else "case-sensitive",
+                        cat_key, locale, exc,
+                    )
+
+            if compiled:
+                self._locale_category_regexes[locale][cat_key] = compiled
                 self._locale_category_type_maps[locale][cat_key] = type_order
-            except re.error as exc:
-                _log.error(
-                    "Failed to compile category regex for '%s' in locale '%s': %s",
-                    cat_key, locale, exc,
-                )
-                # Fall back: no mega-regex for this category; scanner will
-                # iterate individual patterns instead.
 
 
     # ── internal builder ──────────────────────────────────────────────────

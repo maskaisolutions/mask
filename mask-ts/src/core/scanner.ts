@@ -27,6 +27,21 @@ const _dlpPatternRegistry = new DLPPatternRegistry();
 const _dlpValidationEngine = new DLPValidationEngine();
 const _dlpConfidenceScorer = new DLPConfidenceScorer();
 
+/**
+ * Runs an async callback over an array in sequential batches of CHUNK_SIZE.
+ *
+ * This prevents unbounded Promise.all storms on large documents (e.g. a file
+ * with 10,000+ PII hits would previously flood the vault/crypto subsystem with
+ * 10,000 concurrent promises). With chunking we cap concurrency at 50 at a
+ * time, balancing throughput and memory/latency stability.
+ */
+const CHUNK_SIZE = 50;
+async function chunkEncode<T>(items: T[], fn: (item: T) => Promise<void>): Promise<void> {
+  for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+    await Promise.all(items.slice(i, i + CHUNK_SIZE).map(fn));
+  }
+}
+
 export class BaseScanner {
   protected _supportedEntities: string[];
 
@@ -71,50 +86,54 @@ export class BaseScanner {
   ): Promise<Span[]> {
     const detectedLanguage = _dlpLanguageResolver.resolve(text);
     const spans: Span[] = [];
+    // getCategoryRegexesMap now returns Map<catKey, {re, typeOrder}[]>
+    // Each category has at most two sub-groups: one case-sensitive, one case-insensitive.
+    // Keeping them separate prevents IGNORECASE from bleeding between patterns.
     const categoryMap = _dlpPatternRegistry.getCategoryRegexesMap();
 
-    // Pass 1: Category Mega-Regexes (O(text) per category bucket)
-    for (const [catKey, { re, typeOrder }] of categoryMap.entries()) {
-      const megaRe = new RegExp(re.source, re.flags);
-      let m: RegExpExecArray | null;
-      while ((m = megaRe.exec(text)) !== null) {
-        // Identify which named group matched
-        const groups = m.groups ?? {};
-        let typeTag: string | undefined;
-        for (const name of typeOrder) {
-          if (groups[name] !== undefined) { typeTag = name; break; }
-        }
-        if (!typeTag) continue;
-        const matchedStr = m[0];
-        if (looksLikeToken(matchedStr)) continue;
-        const descriptor = _dlpPatternRegistry.descriptorFor(typeTag);
-        if (!descriptor) continue;
-
-        const validatorResult = _dlpValidationEngine.run(descriptor.validatorTag, matchedStr);
-        
-        let conf: number;
-        // FUZZY FAIL-SAFE logic
-        if (validatorResult === false) {
-          if (descriptor.isHighEntropy) {
-            conf = 0.85; // Boosted to prioritize over generic types
-          } else {
-            continue;
+    // Pass 1: Category sub-group regexes (O(text) per sub-group)
+    for (const [catKey, groups] of categoryMap.entries()) {
+      for (const { re, typeOrder } of groups) {
+        const megaRe = new RegExp(re.source, re.flags);
+        let m: RegExpExecArray | null;
+        while ((m = megaRe.exec(text)) !== null) {
+          const groups = m.groups ?? {};
+          let typeTag: string | undefined;
+          for (const name of typeOrder) {
+            if (groups[name] !== undefined) { typeTag = name; break; }
           }
-        } else {
-          conf = _dlpConfidenceScorer.score({
-            baseRisk: descriptor.baseRisk,
-            matchStart: m.index,
-            matchEnd: m.index + matchedStr.length,
-            fullText: text,
-            proximityTerms: descriptor.proximityTerms,
-            validatorPassed: validatorResult,
-          });
-        }
+          if (!typeTag) continue;
+          const matchedStr = m[0];
+          if (looksLikeToken(matchedStr)) continue;
+          const descriptor = _dlpPatternRegistry.descriptorFor(typeTag);
+          if (!descriptor) continue;
 
-        if (conf >= confidenceThreshold) {
-          spans.push({ start: m.index, end: m.index + matchedStr.length,
-            entityType: typeTag, originalValue: matchedStr,
-            confidence: conf, method: 'dlp_heuristic', language: detectedLanguage });
+          const validatorResult = _dlpValidationEngine.run(descriptor.validatorTag, matchedStr);
+
+          let conf: number;
+          // FUZZY FAIL-SAFE logic
+          if (validatorResult === false) {
+            if (descriptor.isHighEntropy) {
+              conf = 0.85; // Boosted to prioritize over generic types
+            } else {
+              continue;
+            }
+          } else {
+            conf = _dlpConfidenceScorer.score({
+              baseRisk: descriptor.baseRisk,
+              matchStart: m.index,
+              matchEnd: m.index + matchedStr.length,
+              fullText: text,
+              proximityTerms: descriptor.proximityTerms,
+              validatorPassed: validatorResult,
+            });
+          }
+
+          if (conf >= confidenceThreshold) {
+            spans.push({ start: m.index, end: m.index + matchedStr.length,
+              entityType: typeTag, originalValue: matchedStr,
+              confidence: conf, method: 'dlp_heuristic', language: detectedLanguage });
+          }
         }
       }
     }
@@ -204,12 +223,13 @@ export class BaseScanner {
 
   protected _resolveBoost(context?: string | null): Set<string> {
     if (!context) return new Set();
-    const lowered = context.toLowerCase();
     const boosted = new Set<string>();
-    // Scan registry descriptors to see if any proximity terms match the context
+    // Match proximity terms on whole-word boundaries only to prevent short
+    // terms (e.g. "id") from firing inside unrelated words ("hidden", "video").
     for (const [, desc] of _dlpPatternRegistry.iterDescriptors()) {
       for (const term of desc.proximityTerms) {
-        if (lowered.includes(term)) {
+        const pattern = new RegExp('\\b' + term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+        if (pattern.test(context)) {
           boosted.add(desc.category.toLowerCase());
           break;
         }
@@ -242,11 +262,11 @@ export class BaseScanner {
       allSpans.push(...await this._tier0CollectSpans(text, confidenceThreshold));
     }
 
-    // ── Single-pass resolve + reconstruct ────────────────────────────────
+    // ── Single-pass resolve + reconstruct (with chunked encoding) ────────
     const resolved = resolveOverlaps(allSpans);
-    await Promise.all(resolved.map(async (span) => {
+    await chunkEncode(resolved, async (span) => {
       span.maskedValue = await _encode(span.originalValue, { entityType: span.entityType });
-    }));
+    });
     let currentText = reconstruct(text, resolved);
 
     // ── Tier 2: Probabilistic NLP (on already-masked text) ───────────────
@@ -282,12 +302,12 @@ export class BaseScanner {
     }
 
     const resolved = resolveOverlaps(allSpans);
-    await Promise.all(resolved.map(async (span) => {
+    await chunkEncode(resolved, async (span) => {
       span.maskedValue = await _encode(span.originalValue, { entityType: span.entityType });
       allEntities.push({ type: span.entityType, value: span.originalValue,
         method: span.method, confidence: span.confidence,
         masked_value: span.maskedValue, language: span.language });
-    }));
+    });
 
     const remaining = reconstruct(text, resolved);
 

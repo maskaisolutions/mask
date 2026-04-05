@@ -180,7 +180,7 @@ const RAW_PATTERNS: RawEntry[] = [
  */
 export class DLPPatternRegistry {
   private readonly catalogue: Map<string, PatternDescriptor> = new Map();
-  private readonly localeCategoryRegexMap: Map<string, Map<string, { re: RegExp; typeOrder: string[] }>> = new Map();
+  private readonly localeCategoryRegexMap: Map<string, Map<string, { re: RegExp; typeOrder: string[] }[]>> = new Map();
 
   constructor(loadGroups?: ReadonlySet<SensitiveCategory>) {
     this.buildCatalogue(loadGroups ?? null);
@@ -210,7 +210,7 @@ export class DLPPatternRegistry {
     return LOCALE_ADDRESS_RULES[lang] ?? LOCALE_ADDRESS_RULES["en"];
   }
 
-  getCategoryRegexesMap(locale: string = "en"): Map<string, { re: RegExp; typeOrder: string[] }> {
+  getCategoryRegexesMap(locale: string = "en"): Map<string, { re: RegExp; typeOrder: string[] }[]> {
     if (!this.localeCategoryRegexMap.has(locale)) {
       this.compileForLocale(locale);
     }
@@ -218,7 +218,9 @@ export class DLPPatternRegistry {
   }
 
   getCategoryTypeMap(categoryName: string, locale: string = "en"): string[] {
-    return this.localeCategoryRegexMap.get(locale)?.get(categoryName)?.typeOrder ?? [];
+    // Flatten typeOrders across all sub-groups (cs + ci) for this category
+    const groups = this.localeCategoryRegexMap.get(locale)?.get(categoryName) ?? [];
+    return groups.flatMap(g => g.typeOrder);
   }
 
   private compileForLocale(locale: string): void {
@@ -232,7 +234,10 @@ export class DLPPatternRegistry {
       }
     }
 
-    const categoryMap = new Map<string, { re: RegExp; typeOrder: string[] }>();
+    // Each category now stores an array of {re, typeOrder} sub-groups \u2014
+    // at most two: one case-sensitive, one case-insensitive. This prevents
+    // IGNORECASE from any single pattern bleeding into unrelated strict rules.
+    const categoryMap = new Map<string, { re: RegExp; typeOrder: string[] }[]>();
 
     for (const [catKey, entries] of localePool.entries()) {
       entries.sort(([, a], [, b]) => {
@@ -242,22 +247,42 @@ export class DLPPatternRegistry {
         return b.compiledRe.source.length - a.compiledRe.source.length;
       });
 
-      const parts: string[] = [];
-      const typeOrder: string[] = [];
+      // Partition by case sensitivity
+      const csParts: string[] = [];  // case-sensitive
+      const csOrder: string[] = [];
+      const ciParts: string[] = [];  // case-insensitive
+      const ciOrder: string[] = [];
+
       for (const [typeName, desc] of entries) {
-        parts.push(`(?<${typeName}>${desc.compiledRe.source})`);
-        typeOrder.push(typeName);
+        const named = `(?<${typeName}>${desc.compiledRe.source})`;
+        if (desc.compiledRe.flags.includes('i')) {
+          ciParts.push(named);
+          ciOrder.push(typeName);
+        } else {
+          csParts.push(named);
+          csOrder.push(typeName);
+        }
       }
 
-      const combinedSource = parts.join('|');
-      const needsI = entries.some(([, d]) => d.compiledRe.flags.includes('i'));
-      const flags = needsI ? 'gi' : 'g';
+      const groups: { re: RegExp; typeOrder: string[] }[] = [];
+      const subGroups: [string[], string[], string][] = [
+        [csParts, csOrder, 'g'],
+        [ciParts, ciOrder, 'gi'],
+      ];
 
-      try {
-        const re = new RegExp(combinedSource, flags);
-        categoryMap.set(catKey, { re, typeOrder });
-      } catch (err) {
-        console.error(`[DLPPatternRegistry] Locale [${locale}] category [${catKey}] failed:`, err);
+      for (const [parts, order, flags] of subGroups) {
+        if (parts.length === 0) continue;
+        try {
+          groups.push({ re: new RegExp(parts.join('|'), flags), typeOrder: order });
+        } catch (err) {
+          console.error(
+            `[DLPPatternRegistry] Locale [${locale}] category [${catKey}] (${flags}) failed:`, err
+          );
+        }
+      }
+
+      if (groups.length > 0) {
+        categoryMap.set(catKey, groups);
       }
     }
 
