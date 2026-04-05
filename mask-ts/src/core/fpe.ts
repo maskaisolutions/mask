@@ -51,7 +51,7 @@ export function resetMasterKey(): void {
 // Detectors — order matters: first match wins
 
 const _EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-const _PHONE_RE = /(?<!\d)(?:\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}|\d{3}[\s\-.]?\d{4})(?!\d)/;
+const _PHONE_RE = /(?<!\d)(?:\+?1?[\s\-.]?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}|\d{3}[\s\-.]?\d{4}|\+\d{2,3}[\s\-.]?\d{3}[\s\-.]?\d{3}[\s\-.]?\d{3,4})(?!\d)/;
 const _PHONE_INTL_RE = /(?<!\d)\+(?:[1-9]\d{0,3})[-.\s]?\(?\d{1,5}\)?(?:[-.\s]?\d{2,4}){2,4}(?!\d)/;
 const _SSN_RE = /^\d{3}-\d{2}-\d{4}$/;
 const _CC_RE = /^(?:\d{4}[ \-]?){3}\d{4}$/;
@@ -143,7 +143,7 @@ export async function generateFPEToken(rawText: string, entityType: string = 'UN
     else if (_SSN_RE.test(text)) type = "US_SSN";
     else if (_CC_RE.test(text)) type = "CREDIT_CARD";
     else if (_ROUTING_RE.test(text)) type = "US_ROUTING_NUMBER";
-    else if (_ES_ID_RE.test(text)) type = "ES_DNI";
+    else if (_ES_ID_RE.test(text)) type = "ES_ID";
     else if (_IBAN_RE.test(text)) type = "INTL_BANK_IBAN";
     else if (_PHONE_RE.test(text)) type = "PHONE_NUMBER";
   }
@@ -180,7 +180,7 @@ export async function generateFPEToken(rawText: string, entityType: string = 'UN
     return `${countryCode}00${(await _hmacHex(text, 8)).toUpperCase()}`;
   }
 
-  if (type === "ES_DNI") {
+  if (type === "ES_ID" || type === "ES_DNI") {
     const digits = `000${await _hmacDigits(text, 5)}`;
     return digits + _computeEsIdCheck(parseInt(digits, 10));
   }
