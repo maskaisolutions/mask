@@ -44,8 +44,11 @@ export function resetMasterKey(): void {
 }
 
 async function _getAesKey(): Promise<Buffer> {
+  // Salt the derivation with the tenant ID to guarantee per-tenant FF1
+  // uniqueness — two tenants with the same plaintext must never produce
+  // the same FPE token (cross-tenant collision prevention).
   const masterKey = await _getMasterKey();
-  return crypto.createHash('sha256').update(masterKey).digest();
+  return crypto.createHmac('sha256', masterKey).update(config.MASK_TENANT_ID, 'utf-8').digest();
 }
 
 const _EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -65,17 +68,24 @@ async function _hmacHex(plaintext: string, n: number = 8): Promise<string> {
 // ── Bijective Synthesis Engine ─────────────────────────────────────────────
 
 async function _getBijectiveTweak(): Promise<Buffer> {
-  const masterKey = await _getMasterKey();
-  let base = config.MASK_TENANT_ID;
+  /**
+   * Derive the FF1 tweak deterministically from the tenant ID.
+   *
+   * IMPORTANT: The tweak is intentionally time-independent. Historical use of
+   * MASK_SALT_ROTATION (MONTHLY/YEARLY) caused permanent data loss when the
+   * calendar rolled over because old tokens could no longer be re-derived.
+   * Use MASK_KEYRING for key rotation instead; MASK_SALT_ROTATION is now a
+   * no-op and will emit a console.warn if set to a non-NONE value.
+   */
   if (config.MASK_SALT_ROTATION !== 'NONE') {
-    const now = new Date();
-    if (config.MASK_SALT_ROTATION === 'MONTHLY') {
-      base += `-${now.getUTCFullYear()}-${now.getUTCMonth() + 1}`;
-    } else if (config.MASK_SALT_ROTATION === 'YEARLY') {
-      base += `-${now.getUTCFullYear()}`;
-    }
+    console.warn(
+      `[mask] MASK_SALT_ROTATION=${config.MASK_SALT_ROTATION} is deprecated and ignored. ` +
+      'Time-based tweaks caused permanent data loss on month/year rollovers. ' +
+      'Use MASK_KEYRING for key rotation instead.'
+    );
   }
-  return crypto.createHmac('sha256', masterKey).update(base, 'utf-8').digest();
+  const masterKey = await _getMasterKey();
+  return crypto.createHmac('sha256', masterKey).update(config.MASK_TENANT_ID, 'utf-8').digest();
 }
 
 async function _encryptBijectiveFF1(text: string): Promise<bigint> {

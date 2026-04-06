@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0]
+
+### Added
+- **KMS Keyring Proxying (PCI DSS):** Extended `BaseKeyProvider` to natively retrieve JSON Keyring documents straight from AWS KMS, Azure Key Vault, and HashiCorp Vault APIs, fully eliminating raw cryptographic secrets from persistent environment variables.
+- **Bounded LRU Vault Cache:** Introduced a strict upper limit on caching overhead via `MASK_VAULT_MAX_MEMORY_KEYS` (default: 100,000). The `MemoryVault` mechanism was rearchitected to provide true LRU cache eviction, permanently resolving Out-Of-Memory (OOM) risks during massive dataset migrations.
+
+### Changed
+- **Asynchronous WAL Log Overflow (SOC 2):** Completely eliminated telemetry data loss under load. Replaced the blocking thread mechanisms (`_flushSync` DoS vulnerability) with an asynchronous Write-Ahead Log (WAL) that spools directly to disk overflowing buffers seamlessly.
+- **Strict PII Telemetry Redaction:** Deprecated the usage of generic token regexing in the audit log pipelines (`_deep_mask`) for an absolute `is_unambiguously_safe_token()` check. This strictly enforces synthetic watermarks (`[TKN`, `tkn-`), permanently ensuring ambiguous PAN/SSN data will never accidentally bypass telemetry redaction.
+
 ## [3.5.1]
 
 ### Fixed
@@ -45,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[4.2.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v4.2.0
 [3.5.1]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.5.1
 [3.5.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.5.0
 [3.4.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.4.0

@@ -56,3 +56,46 @@ def test_argon2id_kdf_enforcement():
         CryptoEngine._instance = None
         if "argon2.low_level" in sys.modules:
             del sys.modules["argon2.low_level"]
+
+def test_keyring_key_rotation_aes_v2():
+    """
+    Verify that the JSON MASK_KEYRING successfully rotates keys.
+    The CryptoEngine should encrypt using the "active" (last) key in the keyring,
+    and successfully decrypt both the active and historical ciphertexts without data loss.
+    """
+    from mask_privacy.core.crypto import CryptoEngine
+    import json
+    
+    keyring_payload = json.dumps({
+        "v1": "a" * 32,
+        "v2": "b" * 32
+    })
+    
+    with patch.dict(os.environ, {"MASK_KEYRING": keyring_payload}):
+        CryptoEngine.reset()
+        crypto = CryptoEngine()
+        
+        plaintext = "sensitive_data123"
+        
+        # 1. Encrypt uses the active (v2) key
+        ciphertext_v2 = crypto.encrypt(plaintext)
+        assert ciphertext_v2.startswith("aes:v2:v2:")
+        
+        # 2. Decrypting the current active key works
+        decrypted_v2 = crypto.decrypt(ciphertext_v2)
+        assert decrypted_v2 == plaintext
+        
+        # 3. Simulate legacy ciphertext from the older v1 key
+        # We temporarily set v1 as active just to generate a valid v1 ciphertext
+        crypto._active_key_id = "v1"
+        ciphertext_v1 = crypto.encrypt(plaintext)
+        assert ciphertext_v1.startswith("aes:v2:v1:")
+        
+        # Reset back to v2 as active
+        crypto._active_key_id = "v2"
+        
+        # 4. Decrypting the legacy (v1) ciphertext works seamlessly
+        decrypted_v1 = crypto.decrypt(ciphertext_v1)
+        assert decrypted_v1 == plaintext
+        
+        CryptoEngine.reset()

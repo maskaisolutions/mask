@@ -33,6 +33,17 @@ export abstract class BaseKeyProvider {
 
   /** Return the HMAC master key, or null to auto-generate. */
   abstract getMasterKey(): Promise<string | null> | string | null;
+
+  /**
+   * Return a JSON keyring string (e.g. from KMS / Secrets Manager), or null
+   * to fall back to the MASK_KEYRING environment variable.
+   *
+   * Override in KMS-backed providers to source the full keyring from a
+   * secure external store, removing the need for MASK_KEYRING in env vars.
+   */
+  getKeyring(): Promise<string | null> | string | null {
+    return null;
+  }
 }
 
 /**
@@ -57,6 +68,11 @@ export class EnvKeyProvider extends BaseKeyProvider {
   async getMasterKey(): Promise<string | null> {
     let key = config.MASK_MASTER_KEY;
     return key || null;
+  }
+
+  /** Return MASK_KEYRING from environment (default behaviour). */
+  async getKeyring(): Promise<string | null> {
+    return config.MASK_KEYRING || null;
   }
 }
 
@@ -141,6 +157,30 @@ export class AwsKmsKeyProvider extends BaseKeyProvider {
   async getMasterKey(): Promise<string | null> {
     return await this.getEncryptionKey();
   }
+
+  /**
+   * Retrieve the JSON keyring from AWS Secrets Manager.
+   *
+   * If MASK_KEYRING_SECRET_ID is set, this provider fetches the full JSON
+   * keyring document from Secrets Manager, enabling zero-downtime key
+   * rotation without writing key material to environment variables.
+   */
+  async getKeyring(): Promise<string | null> {
+    const secretId = process.env.MASK_KEYRING_SECRET_ID;
+    if (!secretId) return null;
+    try {
+      const { GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+      const client = await this._getSecretsClient();
+      const response = await client.send(new GetSecretValueCommand({ SecretId: secretId }));
+      const keyringStr = response.SecretString;
+      if (!keyringStr) throw new Error('MASK_KEYRING_SECRET_ID returned an empty secret.');
+      console.info(`Keyring loaded from AWS Secrets Manager (secret: ${secretId})`);
+      return keyringStr;
+    } catch (e) {
+      console.error('Failed to retrieve keyring from AWS Secrets Manager:', e);
+      throw e;
+    }
+  }
 }
 
 /**
@@ -176,6 +216,25 @@ export class AzureKeyVaultProvider extends BaseKeyProvider {
   async getMasterKey(): Promise<string | null> {
     return await this.getEncryptionKey();
   }
+
+  /**
+   * Retrieve the JSON keyring from Azure Key Vault.
+   * Looks for a secret named `<secretName>-keyring`.
+   */
+  async getKeyring(): Promise<string | null> {
+    const keyringSecretName = this.secretName + '-keyring';
+    try {
+      const client = await this._getClient();
+      const secret = await client.getSecret(keyringSecretName);
+      if (secret.value) {
+        console.info(`Keyring loaded from Azure Key Vault (secret: ${keyringSecretName})`);
+        return secret.value;
+      }
+    } catch {
+      // Secret may not exist; fall back to env
+    }
+    return null;
+  }
 }
 
 /**
@@ -206,6 +265,27 @@ export class HashiCorpVaultProvider extends BaseKeyProvider {
 
   async getMasterKey(): Promise<string | null> {
     return await this.getEncryptionKey();
+  }
+
+  /**
+   * Retrieve the JSON keyring from HashiCorp Vault.
+   * Looks for a `keyring` key in the secret at `secretPath`.
+   */
+  async getKeyring(): Promise<string | null> {
+    try {
+      const axios = require('axios');
+      const url = `${this.vaultAddr}/v1/${this.secretPath}`;
+      const response = await axios.get(url, { headers: { 'X-Vault-Token': this._token } });
+      const data = response.data?.data?.data || response.data?.data;
+      const keyringStr = data?.keyring;
+      if (keyringStr) {
+        console.info(`Keyring loaded from HashiCorp Vault (path: ${this.secretPath})`);
+        return keyringStr;
+      }
+    } catch (e) {
+      console.error('HashiCorp Vault keyring retrieval failed:', e);
+    }
+    return null;
   }
 }
 

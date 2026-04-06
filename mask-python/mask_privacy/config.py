@@ -46,6 +46,11 @@ def __getattr__(name: str):
     # Security
     if name == "MASK_ENCRYPTION_KEY":
         return os.environ.get("MASK_ENCRYPTION_KEY")
+    if name == "MASK_KEYRING":
+        # JSON map of keyId -> base64 key string for key rotation,
+        # e.g. '{"v1": "key...", "v2": "newkey"}'.
+        # The last entry is treated as the active (encrypting) key.
+        return os.environ.get("MASK_KEYRING")
     if name == "MASK_MASTER_KEY":
         return os.environ.get("MASK_MASTER_KEY", os.environ.get("MASK_ENCRYPTION_KEY", ""))
     if name == "MASK_ENCRYPTED_KEY":
@@ -68,6 +73,8 @@ def __getattr__(name: str):
         return get_env_int("MASK_VAULT_TTL", 600)
     if name == "MASK_VAULT_CLEANUP_FREQUENCY":
         return get_env_float("MASK_VAULT_CLEANUP_FREQUENCY", 0.01)
+    if name == "MASK_VAULT_MAX_MEMORY_KEYS":
+        return get_env_int("MASK_VAULT_MAX_MEMORY_KEYS", 100_000)
     
     # Backend Connections
     if name == "MASK_REDIS_URL":
@@ -116,6 +123,7 @@ MASK_TENANT_ID: str
 MASK_SALT_ROTATION: str
 MASK_BIJECTIVE_MODE: bool
 MASK_ENCRYPTION_KEY: Optional[str]
+MASK_KEYRING: Optional[str]
 MASK_MASTER_KEY: str
 MASK_ENCRYPTED_KEY: Optional[str]
 MASK_STRICT_PROD: bool
@@ -125,6 +133,7 @@ MASK_VAULT_TYPE: str
 MASK_FAIL_STRATEGY: str
 MASK_VAULT_TTL: int
 MASK_VAULT_CLEANUP_FREQUENCY: float
+MASK_VAULT_MAX_MEMORY_KEYS: int
 MASK_REDIS_URL: str
 MASK_DYNAMODB_REGION: str
 MASK_DYNAMODB_TABLE: str

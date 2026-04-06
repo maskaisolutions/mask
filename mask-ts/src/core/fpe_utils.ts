@@ -92,4 +92,50 @@ export function looksLikeToken(value: string | any): boolean {
   return false;
 }
 
+/**
+ * Strict token check safe for use inside audit log redaction (_deepMask).
+ *
+ * Unlike looksLikeToken(), this function excludes patterns that are AMBIGUOUS
+ * with real sensitive data (raw Credit Card and SSN formats). It only returns
+ * true when the value carries an unambiguous FPE watermark that real PII
+ * cannot share.
+ *
+ * This prevents real PANs / SSNs from bypassing redaction and being written
+ * to SOC 2 / HIPAA audit logs in plaintext — a PCI DSS Level 1 failure.
+ */
+export function isUnambiguouslySafeToken(value: string | any): boolean {
+  if (typeof value !== 'string') return false;
+  const v = value.trim();
 
+  // Email FPE token: tkn-<hex>@domain.tld
+  if (v.startsWith("tkn-") && v.includes("@")) {
+    const parts = v.split("@");
+    if (parts.length === 2 && parts[0].length >= 12 && parts[1].includes(".")) {
+      return true;
+    }
+  }
+
+  // Phone FPE token: +CC-555-XXXXXXX  (555 exchange is synthetic watermark)
+  if (/^\+[1-9]\d{0,3}-555-\d{7}$/.test(v)) return true;
+
+  // Spanish DNI FPE token: always starts 000 (real DNIs never start 000)
+  if (/^000\d{5}[A-Z]$/.test(v)) return true;
+
+  // IBAN FPE token: XX00... (real IBANs never have 00 as check digits)
+  if (/^[A-Z]{2}00[A-F0-9]{4,16}$/.test(v)) return true;
+
+  // Semantic NLP tokens: <PER:...>, <LOC:...>, <ORG:...>
+  if (/^<(PER|LOC|ORG):[^>]+>$/.test(v)) return true;
+
+  // Opaque fallback tokens: [TKN-...]
+  if (v.startsWith("[TKN-") && v.endsWith("]")) return true;
+
+  // Bijective Name/Location tokens: always end -DDDD (synthetic pattern)
+  if (/^[A-Z][a-zA-Z, ]+-[0-9]{3,4}$/.test(v)) return true;
+
+  // NOTE: Raw SSN (\d{3}-\d{2}-\d{4}), CC (\d{4}-\d{4}-\d{4}-\d{4}),
+  // and routing (\d{9}) patterns are intentionally EXCLUDED because real
+  // PII shares these exact formats. Use looksLikeToken() only for
+  // detokenization (where context guarantees a token is present).
+  return false;
+}

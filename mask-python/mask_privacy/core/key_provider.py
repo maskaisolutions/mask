@@ -44,6 +44,16 @@ class BaseKeyProvider(ABC):
     def get_master_key(self) -> Optional[str]:
         """Return the HMAC master key, or None to auto-generate."""
 
+    def get_keyring(self) -> Optional[str]:
+        """Return a JSON keyring string (e.g. from KMS / Secrets Manager).
+
+        This method is optional for providers that do not manage the keyring.
+        Return None to fall back to the MASK_KEYRING environment variable.
+        Override in KMS-backed providers to supply the keyring from a
+        secure external source, removing the need for MASK_KEYRING in env.
+        """
+        return None
+
 
 class EnvKeyProvider(BaseKeyProvider):
     """Default provider: reads keys from environment variables.
@@ -62,6 +72,10 @@ class EnvKeyProvider(BaseKeyProvider):
 
     def get_master_key(self) -> Optional[str]:
         return config.MASK_MASTER_KEY or None
+
+    def get_keyring(self) -> Optional[str]:
+        """Return MASK_KEYRING from environment (default behaviour)."""
+        return config.MASK_KEYRING or None
 
 
 # Stub providers for enterprise key management services
@@ -131,6 +145,29 @@ class AwsKmsKeyProvider(BaseKeyProvider):
     def get_master_key(self) -> Optional[str]:
         return self.get_encryption_key()
 
+    def get_keyring(self) -> Optional[str]:
+        """Retrieve the JSON keyring from AWS Secrets Manager.
+
+        If ``MASK_KEYRING_SECRET_ID`` is set, this provider fetches the full
+        JSON keyring document (e.g. ``{"v1": "key...", "v2": "newkey"}``) from
+        Secrets Manager, allowing zero-downtime key rotation without ever
+        writing key material to environment variables.
+        """
+        secret_id = config.MASK_KEYRING_SECRET_ID if hasattr(config, 'MASK_KEYRING_SECRET_ID') else None
+        if not secret_id:
+            # Fallback: let CryptoEngine read from MASK_KEYRING env var
+            return None
+        try:
+            val = self._get_sm().get_secret_value(SecretId=secret_id)
+            keyring_str = val.get("SecretString")
+            if not keyring_str:
+                raise RuntimeError("MASK_KEYRING_SECRET_ID returned an empty secret.")
+            logger.info("Keyring loaded from AWS Secrets Manager (secret: %s)", secret_id)
+            return keyring_str
+        except Exception as e:
+            logger.error("Failed to retrieve keyring from AWS Secrets Manager: %s", e)
+            raise
+
 
 class AzureKeyVaultProvider(BaseKeyProvider):
     """Azure Key Vault-backed key provider."""
@@ -157,6 +194,22 @@ class AzureKeyVaultProvider(BaseKeyProvider):
 
     def get_master_key(self) -> Optional[str]:
         return self.get_encryption_key()
+
+    def get_keyring(self) -> Optional[str]:
+        """Retrieve the JSON keyring from Azure Key Vault.
+
+        If a secret named ``mask-keyring`` (or ``<secret_name>-keyring``) exists
+        in the vault, it is used as the full JSON keyring document.
+        """
+        keyring_secret = self.secret_name + "-keyring"
+        try:
+            secret = self._get_client().get_secret(keyring_secret)
+            if secret.value:
+                logger.info("Keyring loaded from Azure Key Vault (secret: %s)", keyring_secret)
+                return secret.value
+        except Exception:
+            pass  # Secret may not exist; fall back to env
+        return None
 
 
 class HashiCorpVaultProvider(BaseKeyProvider):
@@ -186,6 +239,22 @@ class HashiCorpVaultProvider(BaseKeyProvider):
 
     def get_master_key(self) -> Optional[str]:
         return self.get_encryption_key()
+
+    def get_keyring(self) -> Optional[str]:
+        """Retrieve the JSON keyring from HashiCorp Vault.
+
+        Looks for a ``keyring`` key in the secret at ``secret_path``.
+        """
+        try:
+            read_response = self._get_client().read(self.secret_path)
+            data = read_response.get("data", {}).get("data", {})
+            keyring_str = data.get("keyring")
+            if keyring_str:
+                logger.info("Keyring loaded from HashiCorp Vault (path: %s)", self.secret_path)
+                return keyring_str
+        except Exception as e:
+            logger.error("HashiCorp Vault keyring retrieval failed: %s", e)
+        return None
 
 
 # Singleton accessor

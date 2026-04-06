@@ -38,11 +38,11 @@ describe('TestVaultBackends', () => {
             const firstCall = mockClient.send.mock.calls[0][0] as any;
             const input = firstCall.input;
             
-            expect(input.TransactItems[0].Put.Item.token).toBe("mask:tok_1");
+            expect(input.TransactItems[0].Put.Item.token).toBe("mask:global-default-tenant:tok_1");
             expect(input.TransactItems[0].Put.Item.ciphertext).toBe("secret");
             expect(input.TransactItems[0].Put.Item.ttl).toBeGreaterThanOrEqual(now + 60);
 
-            expect(input.TransactItems[1].Put.Item.token).toBe(`mask-rev:${secretHash}`);
+            expect(input.TransactItems[1].Put.Item.token).toBe(`mask-rev:global-default-tenant:${secretHash}`);
             expect(input.TransactItems[1].Put.Item.ciphertext).toBe("tok_1");
         });
 
@@ -63,10 +63,10 @@ describe('TestVaultBackends', () => {
             
             const sendSpy = jest.fn<any>().mockImplementation(async (command: any) => {
                 if (command.constructor.name === 'GetCommand') {
-                    if (command.input.Key.token === "mask:tok_2") {
+                    if (command.input.Key.token === "mask:global-default-tenant:tok_2") {
                         return {
                             Item: {
-                                token: "mask:tok_2",
+                                token: "mask:global-default-tenant:tok_2",
                                 ciphertext: "safe",
                                 ttl: now + 500
                             }
@@ -83,7 +83,7 @@ describe('TestVaultBackends', () => {
             const staleHash = _hashPlaintext("stale");
             sendSpy.mockResolvedValueOnce({
                 Item: {
-                    token: "mask:tok_expiration",
+                    token: "mask:global-default-tenant:tok_expiration",
                     ciphertext: "stale",
                     ttl: now - 100,
                     ptr_hash: staleHash
@@ -109,8 +109,8 @@ describe('TestVaultBackends', () => {
             const mockClient = {
                 set: jest.fn<any>().mockResolvedValue(true as never),
                 get: jest.fn<any>().mockImplementation(async (key: string) => {
-                    if (key === "mask:tok_A") return { value: Buffer.from("top_secret") };
-                    if (key === "mask-hash:tok_A") return { value: Buffer.from(_hashPlaintext("top_secret")) };
+                    if (key === "mask:global-default-tenant:tok_A") return { value: Buffer.from("top_secret") };
+                    if (key === "mask-hash:global-default-tenant:tok_A") return { value: Buffer.from(_hashPlaintext("top_secret")) };
                     return { value: null };
                 }),
                 delete: jest.fn<any>().mockResolvedValue(true as never)

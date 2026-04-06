@@ -43,6 +43,9 @@ export const config = {
 
   // --- SECURITY & CRYPTOGRAPHY ---
   get MASK_ENCRYPTION_KEY() { return process.env.MASK_ENCRYPTION_KEY || null; },
+  // JSON map of keyId -> base64 key string for key rotation, e.g. {"v1":"...","v2":"..."}
+  // The last entry in the map is treated as the active (encryption) key.
+  get MASK_KEYRING() { return process.env.MASK_KEYRING || null; },
   get MASK_MASTER_KEY() { 
     return process.env.MASK_MASTER_KEY || process.env.MASK_ENCRYPTION_KEY || ''; 
   },
@@ -57,6 +60,7 @@ export const config = {
   get MASK_FAIL_STRATEGY() { return (process.env.MASK_FAIL_STRATEGY || "").toLowerCase(); },
   get MASK_VAULT_TTL() { return getEnvInt('MASK_VAULT_TTL', 600); },
   get MASK_VAULT_CLEANUP_FREQUENCY() { return getEnvFloat('MASK_VAULT_CLEANUP_FREQUENCY', 0.01); },
+  get MASK_VAULT_MAX_MEMORY_KEYS() { return getEnvInt('MASK_VAULT_MAX_MEMORY_KEYS', 100_000); },
 
   // --- BACKEND CONNECTIONS ---
   get MASK_REDIS_URL() { return process.env.MASK_REDIS_URL || "redis://localhost:6379/0"; },

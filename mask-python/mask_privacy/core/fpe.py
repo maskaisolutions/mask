@@ -43,8 +43,11 @@ def reset_master_key() -> None:
     _master_key = None
 
 def _get_aes_key() -> bytes:
-    # Ensure exactly 32 bytes for FF1 AES-256
-    return hashlib.sha256(_get_master_key()).digest()
+    # Ensure exactly 32 bytes for FF1 AES-256.
+    # Salt the derivation with the tenant ID to guarantee per-tenant FF1
+    # uniqueness — two tenants with the same plaintext must never produce
+    # the same FPE token (cross-tenant collision prevention).
+    return hmac.new(_get_master_key(), config.MASK_TENANT_ID.encode("utf-8"), hashlib.sha256).digest()
 
 # Regex Detectors
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -63,15 +66,23 @@ def _hmac_hex(plaintext: str, n: int = 8) -> str:
 # ── Bijective Synthesis Engine ─────────────────────────────────
 
 def _get_bijective_tweak() -> bytes:
-    base = config.MASK_TENANT_ID.encode("utf-8")
+    """Derive the FF1 tweak deterministically from the tenant ID.
+
+    IMPORTANT: The tweak is intentionally time-independent. Historical use of
+    MASK_SALT_ROTATION (MONTHLY/YEARLY) caused permanent data loss when the
+    calendar rolled over because old tokens could no longer be re-derived.
+    Cryptographic key freshness should be managed via MASK_KEYRING rotation,
+    not via time-based tweaks. MASK_SALT_ROTATION is now a no-op and will log
+    a deprecation warning if set to anything other than 'NONE'.
+    """
     if config.MASK_SALT_ROTATION != "NONE":
-        import datetime
-        now = datetime.datetime.now()
-        if config.MASK_SALT_ROTATION == "MONTHLY":
-            base += f"-{now.year}-{now.month}".encode("utf-8")
-        elif config.MASK_SALT_ROTATION == "YEARLY":
-            base += f"-{now.year}".encode("utf-8")
-    return hmac.new(_get_master_key(), base, hashlib.sha256).digest()
+        logger.warning(
+            "MASK_SALT_ROTATION=%s is deprecated and ignored. "
+            "Time-based tweaks caused permanent data loss on month/year rollovers. "
+            "Use MASK_KEYRING for key rotation instead.",
+            config.MASK_SALT_ROTATION,
+        )
+    return hmac.new(_get_master_key(), config.MASK_TENANT_ID.encode("utf-8"), hashlib.sha256).digest()
 
 def _encrypt_bijective_ff1(text: str) -> int:
     canonical = text.lower().strip()
@@ -249,4 +260,40 @@ def looks_like_token(value: str) -> bool:
     if re.match(r"^<(PER|LOC|ORG):[^>]+>$", v): return True
     if v.startswith("[TKN-") and v.endswith("]"): return True
     if re.match(r"^[A-Z][a-zA-Z, ]+-[0-9]{3,4}$", v): return True
+    return False
+
+
+def is_unambiguously_safe_token(value: str) -> bool:
+    """Strict token check safe for use inside audit log redaction (_deep_mask).
+
+    Unlike looks_like_token(), this function excludes patterns that are
+    AMBIGUOUS with real sensitive data (raw Credit Card and SSN formats).
+    It only returns True when the value carries an unambiguous FPE watermark
+    that real PII cannot share.
+
+    This prevents real PANs / SSNs from bypassing redaction and being written
+    to SOC 2 / HIPAA audit logs in plaintext — a PCI DSS Level 1 failure.
+    """
+    v = value.strip()
+    # Email FPE token: tkn-<hex>@domain.tld
+    if v.startswith("tkn-") and "@" in v:
+        parts = v.split("@")
+        if len(parts) == 2 and len(parts[0]) >= 12 and "." in parts[1]:
+            return True
+    # Phone FPE token: +CC-555-XXXXXXX  (555 exchange is synthetic watermark)
+    if re.match(r"^\+[1-9]\d{0,3}-555-\d{7}$", v): return True
+    # Spanish DNI FPE token: always starts 000 (real DNIs never start 000)
+    if re.match(r"^000\d{5}[A-Z]$", v): return True
+    # IBAN FPE token: XX00... (real IBANs never have 00 as check digits)
+    if re.match(r"^[A-Z]{2}00[A-F0-9]{4,16}$", v): return True
+    # Semantic NLP tokens: <PER:...>, <LOC:...>, <ORG:...>
+    if re.match(r"^<(PER|LOC|ORG):[^>]+>$", v): return True
+    # Opaque fallback tokens: [TKN-...]
+    if v.startswith("[TKN-") and v.endswith("]"): return True
+    # Bijective Name/Location tokens: always end -DDDD (synthetic pattern)
+    if re.match(r"^[A-Z][a-zA-Z, ]+-[0-9]{3,4}$", v): return True
+    # NOTE: Raw SSN (\d{3}-\d{2}-\d{4}), CC (\d{4}-\d{4}-\d{4}-\d{4}),
+    # and routing (\d{9}) patterns are intentionally EXCLUDED because real
+    # PII shares these exact formats. Use looks_like_token() only for
+    # detokenization (where context guarantees a token is present).
     return False

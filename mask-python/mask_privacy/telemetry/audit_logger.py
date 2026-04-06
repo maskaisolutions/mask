@@ -19,7 +19,7 @@ import threading
 import signal
 from typing import Any, Dict, Optional, List
 
-from mask_privacy.core.fpe import looks_like_token
+from mask_privacy.core.fpe import is_unambiguously_safe_token
 from mask_privacy import config
 
 logger = logging.getLogger("mask.telemetry")
@@ -33,17 +33,18 @@ def _make_event(
     agent: str = "",
     tool: str = "",
     extra: Optional[Dict[str, Any]] = None,
+    instance_id: str = "",
 ) -> Dict[str, Any]:
     event: Dict[str, Any] = {
         "ts": time.time(),
-        "action": action,      # "encode" | "decode" | "expired" | "error"
+        "action": action,
         "token": token,
-        "data_type": data_type, # "email" | "phone" | "ssn" | "opaque"
+        "data_type": data_type,
         "agent": agent,
         "tool": tool,
+        "instance_id": instance_id,
     }
     if extra:
-        # Sanitize extra fields to prevent PII leakage into audit logs
         event.update(_deep_mask(extra))
     return event
 
@@ -57,7 +58,7 @@ def _deep_mask(obj: Any) -> Any:
     if obj is None:
         return None
     if isinstance(obj, str):
-        return obj if looks_like_token(obj) else "[REDACTED]"
+        return obj if is_unambiguously_safe_token(obj) else "[REDACTED]"
     if isinstance(obj, list):
         return [_deep_mask(v) for v in obj]
     if isinstance(obj, dict):
@@ -101,10 +102,20 @@ class AuditLogger:
 
         # ── HMAC Signature Chain State ─────────────────────────────────────
         # The signing key is derived from MASK_MASTER_KEY so it is tied to
-        # the deployment's identity. The genesis hash is all-zeros.
+        # the deployment's identity.
+        # The genesis hash is derived from a per-instance UUID4 rather than
+        # all-zeros, allowing SOC 2 auditors to verify chain continuity and
+        # prove that each runtime produces a distinct, non-forgeable chain.
+        import uuid
+        self._instance_id: str = str(uuid.uuid4())
         _raw_key = os.environ.get("MASK_MASTER_KEY", "") or os.environ.get("MASK_ENCRYPTION_KEY", "")
         self._signing_key: bytes = hashlib.sha256(_raw_key.encode("utf-8")).digest()
-        self._prev_sig: str = "0" * 64  # genesis hash (64 hex chars)
+        # Genesis = HMAC(signing_key, instance_id) — unique and verifiable
+        self._prev_sig: str = hmac.new(
+            self._signing_key,
+            self._instance_id.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     @classmethod
     def reset(cls) -> None:
@@ -118,6 +129,38 @@ class AuditLogger:
 
     # -- public API --------------------------------------------------------
 
+    def _get_overflow_path(self) -> str:
+        d = os.environ.get("MASK_SECURE_AUDIT_LOG_DIR") or os.environ.get("TEMP") or "/tmp"
+        return os.path.join(d, f"mask_audit_overflow_{self._instance_id}.ndjson")
+
+    def _write_overflow(self, event: Dict[str, Any]) -> None:
+        try:
+            with open(self._get_overflow_path(), "a", encoding="utf-8") as f:
+                f.write(json.dumps(event) + "\n")
+        except OSError as e:
+            if not getattr(self, '_overflow_file_warned', False):
+                logger.error("Failed to write to audit overflow file: %s", e)
+                self._overflow_file_warned = True
+
+    def _consume_overflow(self, events: List[Dict[str, Any]]) -> None:
+        path = self._get_overflow_path()
+        if not os.path.exists(path):
+            return
+        processing_path = path + ".processing"
+        with self._lock:
+            try:
+                os.replace(path, processing_path)
+            except OSError:
+                return
+        try:
+            with open(processing_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        events.append(json.loads(line))
+            os.remove(processing_path)
+        except Exception as e:
+            logger.error("Failed to consume overflow: %s", e)
+
     def log(
         self,
         action: str,
@@ -127,29 +170,20 @@ class AuditLogger:
         tool: str = "",
         **extra: Any,
     ) -> None:
-        """Append an event to the buffer. Synchronous / Blocking if strict."""
-        event = _make_event(action, token, data_type, agent, tool, extra or None)
+        """Append an event to the buffer. Synchronous API."""
+        event = _make_event(action, token, data_type, agent, tool, extra or None, self._instance_id)
         
-        if self._strict_mode:
-            # Backpressure: block until there's room
-            while True:
-                with self._lock:
-                    if len(self._buffer) < self._max_buffer_size:
-                        self._buffer.append(event)
-                        break
-                # Dangerous inside an event loop, but this is the sync API.
-                time.sleep(0.05)
-        else:
-            with self._lock:
-                if len(self._buffer) >= self._max_buffer_size:
-                    if not self._buffer_full_warned:
-                        logger.warning(
-                            "AuditLogger buffer full (max=%d). Dropping newest events to prevent OOM.",
-                            self._max_buffer_size
-                        )
-                        self._buffer_full_warned = True
-                    return
-                self._buffer.append(event)
+        with self._lock:
+            if len(self._buffer) >= self._max_buffer_size:
+                if not self._buffer_full_warned:
+                    logger.warning(
+                        "AuditLogger buffer full (max=%d). Spooling to disk overflow to prevent OOM.",
+                        self._max_buffer_size
+                    )
+                    self._buffer_full_warned = True
+                self._write_overflow(event)
+                return
+            self._buffer.append(event)
         
         logger.debug("audit %s token=%s type=%s", action, token, data_type)
 
@@ -162,22 +196,14 @@ class AuditLogger:
         tool: str = "",
         **extra: Any,
     ) -> None:
-        """Append an event to the buffer. Asynchronous / Non-blocking."""
-        import asyncio
-        event = _make_event(action, token, data_type, agent, tool, extra or None)
+        """Append an event to the buffer. Asynchronous API."""
+        event = _make_event(action, token, data_type, agent, tool, extra or None, self._instance_id)
         
-        if self._strict_mode:
-            while True:
-                with self._lock:
-                    if len(self._buffer) < self._max_buffer_size:
-                        self._buffer.append(event)
-                        break
-                await asyncio.sleep(0.05)
-        else:
-            with self._lock:
-                if len(self._buffer) >= self._max_buffer_size:
-                    return
-                self._buffer.append(event)
+        with self._lock:
+            if len(self._buffer) >= self._max_buffer_size:
+                self._write_overflow(event)
+                return
+            self._buffer.append(event)
 
 
     def start(self) -> None:
@@ -248,11 +274,13 @@ class AuditLogger:
 
     def _flush(self) -> None:
         with self._lock:
-            if not self._buffer:
-                return
             events_to_flush = list(self._buffer)
             self._buffer.clear()
             self._buffer_full_warned = False
+
+        self._consume_overflow(events_to_flush)
+        if not events_to_flush:
+            return
 
         audit_logger = logging.getLogger("mask.audit")
 

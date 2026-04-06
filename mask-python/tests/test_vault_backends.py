@@ -39,12 +39,12 @@ class TestDynamoDBVault:
         args = mock_client.transact_write_items.call_args[1]["TransactItems"]
         
         # Check primary entry
-        assert args[0]["Put"]["Item"]["token"]["S"] == "mask:tok_1"
+        assert args[0]["Put"]["Item"]["token"]["S"] == "mask:tenant-a:tok_1"
         assert args[0]["Put"]["Item"]["ciphertext"]["S"] == "enc_secret"
         assert args[0]["Put"]["Item"]["ttl"]["N"] == "1060"
         
         # Check reverse entry
-        assert args[1]["Put"]["Item"]["token"]["S"] == f"mask-rev:{secret_hash}"
+        assert args[1]["Put"]["Item"]["token"]["S"] == f"mask-rev:tenant-a:{secret_hash}"
         assert args[1]["Put"]["Item"]["ciphertext"]["S"] == "tok_1"
         assert args[1]["Put"]["Item"]["ttl"]["N"] == "1060"
 
@@ -55,7 +55,7 @@ class TestDynamoDBVault:
         
         # Valid item
         mock_table.get_item.return_value = {
-            "Item": {"token": "mask:tok_2", "ciphertext": "safe", "ttl": 1500}
+            "Item": {"token": "mask:tenant-a:tok_2", "ciphertext": "safe", "ttl": 1500}
         }
         
         vault = DynamoDBVault()
@@ -65,12 +65,12 @@ class TestDynamoDBVault:
         from mask_privacy.core.vault import _hash_plaintext
         stale_hash = _hash_plaintext("stale")
         mock_table.get_item.return_value = {
-            "Item": {"token": "mask:tok_expiration", "ciphertext": "stale", "ttl": 900, "ptr_hash": stale_hash}
+            "Item": {"token": "mask:tenant-a:tok_expiration", "ciphertext": "stale", "ttl": 900, "ptr_hash": stale_hash}
         }
         assert vault.retrieve("tok_expiration") is None
         # Should have auto-deleted the expired row and its reverse mapping
-        mock_table.delete_item.assert_any_call(Key={"token": f"mask-rev:{stale_hash}"})
-        mock_table.delete_item.assert_any_call(Key={"token": "mask:tok_expiration"})
+        mock_table.delete_item.assert_any_call(Key={"token": f"mask-rev:tenant-a:{stale_hash}"})
+        mock_table.delete_item.assert_any_call(Key={"token": "mask:tenant-a:tok_expiration"})
 
     def test_delete_removes_item(self, mock_resource_method):
         mock_table = mock.MagicMock()
@@ -81,16 +81,16 @@ class TestDynamoDBVault:
         
         # Mock get_item so delete() can find the item and its ptr_hash
         def mock_get(Key):
-            if Key["token"] == "mask:tok_3":
-                return {"Item": {"token": "mask:tok_3", "ciphertext": "data3", "ttl": 9999999999, "ptr_hash": data3_hash}}
+            if Key["token"] == "mask:tenant-a:tok_3":
+                return {"Item": {"token": "mask:tenant-a:tok_3", "ciphertext": "data3", "ttl": 9999999999, "ptr_hash": data3_hash}}
             return {}
         mock_table.get_item.side_effect = mock_get
         
         vault = DynamoDBVault()
         vault.delete("tok_3")
         
-        mock_table.delete_item.assert_any_call(Key={"token": f"mask-rev:{data3_hash}"})
-        mock_table.delete_item.assert_any_call(Key={"token": "mask:tok_3"})
+        mock_table.delete_item.assert_any_call(Key={"token": f"mask-rev:tenant-a:{data3_hash}"})
+        mock_table.delete_item.assert_any_call(Key={"token": "mask:tenant-a:tok_3"})
 
 
 # Memcached Tests
@@ -117,9 +117,9 @@ class TestMemcachedVault:
             # Verify set_multi was called (once for all 3 keys)
             mock_client.set_multi.assert_called_once()
             keys_written = mock_client.set_multi.call_args[0][0]
-            assert "mask:tok_A" in keys_written
-            assert f"mask-rev:{ts_hash}" in keys_written
-            assert "mask-hash:tok_A" in keys_written
+            assert "mask:tenant-a:tok_A" in keys_written
+            assert f"mask-rev:tenant-a:{ts_hash}" in keys_written
+            assert "mask-hash:tenant-a:tok_A" in keys_written
             
             # test retrieve
             mock_client.get.return_value = b"bytes_secret"
@@ -127,7 +127,7 @@ class TestMemcachedVault:
             
             # test delete — use side_effect to return the pt_hash for mask-hash lookup
             def mock_get_for_delete(key):
-                if key == f"mask-hash:tok_A":
+                if key == f"mask-hash:tenant-a:tok_A":
                     return ts_hash.encode("utf-8")
                 return b"bytes_secret"
             mock_client.get.side_effect = mock_get_for_delete
@@ -136,6 +136,6 @@ class TestMemcachedVault:
             # Verify delete_multi was called
             mock_client.delete_multi.assert_called_once()
             keys_deleted = mock_client.delete_multi.call_args[0][0]
-            assert "mask:tok_A" in keys_deleted
-            assert "mask-hash:tok_A" in keys_deleted
-            assert f"mask-rev:{ts_hash}" in keys_deleted
+            assert "mask:tenant-a:tok_A" in keys_deleted
+            assert "mask-hash:tenant-a:tok_A" in keys_deleted
+            assert f"mask-rev:tenant-a:{ts_hash}" in keys_deleted

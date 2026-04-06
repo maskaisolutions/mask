@@ -81,6 +81,34 @@ export function _hashPlaintext(plaintext: string, secret?: Buffer): string {
   return crypto.createHash('sha256').update(trimmed, 'utf-8').digest('hex');
 }
 
+// ---------------------------------------------------------------------------
+// Tenant-namespaced cache key helpers
+// ---------------------------------------------------------------------------
+
+function _vaultKey(token: string): string {
+  return `mask:${config.MASK_TENANT_ID}:${token}`;
+}
+function _vaultRevKey(ptHash: string): string {
+  return `mask-rev:${config.MASK_TENANT_ID}:${ptHash}`;
+}
+function _vaultHashKey(token: string): string {
+  return `mask-hash:${config.MASK_TENANT_ID}:${token}`;
+}
+
+/**
+ * Extract the ciphertext from a JSON compliance envelope {ct, meta}, or return raw.
+ * Fixes the fatal bug where tokens stored with metadata could never be decrypted.
+ */
+function _unwrapPayload(raw: string): string {
+  if (raw && raw.startsWith('{')) {
+    try {
+      const obj = JSON.parse(raw);
+      if (obj.ct) return obj.ct;
+    } catch {}
+  }
+  return raw;
+}
+
 /**
  * In-memory implementation (single-process, dev / testing)
  *
@@ -89,21 +117,21 @@ export function _hashPlaintext(plaintext: string, secret?: Buffer): string {
 export class MemoryVault extends BaseVault {
   private _store: Map<string, { plaintext: string; expiry: number; ptHash: string | null; metadata: Record<string, string> }>;
   private _reverseStore: Map<string, string>;
+  private _cleanupTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     super();
     this._store = new Map();
     this._reverseStore = new Map();
+    // Replace probabilistic inline cleanup with a background timer (unreffed
+    // so it never prevents process exit) to eliminate request-path latency jitter.
+    this._cleanupTimer = setInterval(() => this._cleanup(), 60_000);
+    if (this._cleanupTimer && typeof this._cleanupTimer.unref === 'function') {
+      this._cleanupTimer.unref();
+    }
   }
 
   private _cleanup(): void {
-    // Probabilistic cleanup to prevent memory bloat
-    // Configurable frequency (default 1%) balances CPU vs Memory usage
-    const cleanupFreq = config.MASK_VAULT_CLEANUP_FREQUENCY;
-    if (Math.random() > cleanupFreq) {
-      return;
-    }
-
     const now = Date.now() / 1000;
     for (const [token, entry] of this._store.entries()) {
       if (now > entry.expiry) {
@@ -116,8 +144,22 @@ export class MemoryVault extends BaseVault {
   }
 
   async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null, metadata: Record<string, string> | null = null): Promise<void> {
-    this._cleanup();
+    // Enforce max memory keys bound (OOM prevention)
+    if (!this._store.has(token) && this._store.size >= config.MASK_VAULT_MAX_MEMORY_KEYS) {
+      const firstKey = this._store.keys().next().value;
+      if (firstKey !== undefined) {
+        const oldEntry = this._store.get(firstKey);
+        this._store.delete(firstKey);
+        if (oldEntry?.ptHash && this._reverseStore.get(oldEntry.ptHash) === firstKey) {
+          this._reverseStore.delete(oldEntry.ptHash);
+        }
+      }
+    }
+
     const existing = this._store.get(token);
+    // Delete to reset insertion order (implementing true LRU over simple FIFO)
+    if (existing) this._store.delete(token);
+
     this._store.set(token, {
       plaintext: ciphertext,
       expiry: (Date.now() / 1000) + ttlSeconds,
@@ -130,7 +172,6 @@ export class MemoryVault extends BaseVault {
   }
 
   async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
-    this._cleanup();
     const token = this._reverseStore.get(ptHash);
     if (token && this._store.has(token)) {
       return token;
@@ -144,7 +185,6 @@ export class MemoryVault extends BaseVault {
   }
 
   async retrieve(token: string): Promise<string | null> {
-    this._cleanup();
     const entry = this._store.get(token);
     if (!entry) {
       return null;
@@ -217,12 +257,11 @@ export class RedisVault extends BaseVault {
   async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null, metadata: Record<string, string> | null = null): Promise<void> {
     try {
       const pipeline = this._client.pipeline();
-      // Serialize metadata alongside ciphertext as a JSON envelope
       const payload = metadata ? JSON.stringify({ ct: ciphertext, meta: metadata }) : ciphertext;
-      pipeline.set(`mask:${token}`, payload, 'EX', ttlSeconds);
+      pipeline.set(_vaultKey(token), payload, 'EX', ttlSeconds);
       if (ptHash) {
-        pipeline.set(`mask-rev:${ptHash}`, token, 'EX', ttlSeconds);
-        pipeline.set(`mask-hash:${token}`, ptHash, 'EX', ttlSeconds);
+        pipeline.set(_vaultRevKey(ptHash), token, 'EX', ttlSeconds);
+        pipeline.set(_vaultHashKey(token), ptHash, 'EX', ttlSeconds);
       }
       const results = await pipeline.exec();
       if (results) {
@@ -237,7 +276,7 @@ export class RedisVault extends BaseVault {
 
   async getPtHashForToken(token: string): Promise<string | null> {
     try {
-      return await this._client.get(`mask-hash:${token}`);
+      return await this._client.get(_vaultHashKey(token));
     } catch {
       return null;
     }
@@ -245,12 +284,12 @@ export class RedisVault extends BaseVault {
 
   async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
     try {
-      const token = await this._client.get(`mask-rev:${ptHash}`);
+      const token = await this._client.get(_vaultRevKey(ptHash));
       if (token) {
-        if (await this._client.exists(`mask:${token}`)) {
+        if (await this._client.exists(_vaultKey(token))) {
           return token;
         } else {
-          await this._client.del(`mask-rev:${ptHash}`);
+          await this._client.del(_vaultRevKey(ptHash));
         }
       }
       return null;
@@ -264,7 +303,8 @@ export class RedisVault extends BaseVault {
 
   async retrieve(token: string): Promise<string | null> {
     try {
-      return await this._client.get(`mask:${token}`);
+      const raw = await this._client.get(_vaultKey(token));
+      return raw ? _unwrapPayload(raw) : null;
     } catch (e) {
       if (_getFailStrategy() === 'closed') {
         throw new MaskVaultConnectionError(`Redis read failed: ${e}`);
@@ -275,12 +315,12 @@ export class RedisVault extends BaseVault {
 
   async delete(token: string): Promise<void> {
     try {
-      const ptHash = await this._client.get(`mask-hash:${token}`);
+      const ptHash = await this._client.get(_vaultHashKey(token));
       const pipeline = this._client.pipeline();
-      pipeline.del(`mask:${token}`);
-      pipeline.del(`mask-hash:${token}`);
+      pipeline.del(_vaultKey(token));
+      pipeline.del(_vaultHashKey(token));
       if (ptHash) {
-        pipeline.del(`mask-rev:${ptHash}`);
+        pipeline.del(_vaultRevKey(ptHash));
       }
       await pipeline.exec();
     } catch (e) {
@@ -332,54 +372,38 @@ export class DynamoDBVault extends BaseVault {
     console.info(`DynamoDBVault connected to table ${this._tableName} in ${this._region}`);
   }
 
-  async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null): Promise<void> {
+  async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null, metadata: Record<string, string> | null = null): Promise<void> {
     const { TransactWriteCommand, PutCommand } = require('@aws-sdk/lib-dynamodb');
     const now = Math.floor(Date.now() / 1000);
     const ttlVal = now + ttlSeconds;
-    const item = {
-      token: `mask:${token}`,
+    const primaryItem: Record<string, any> = {
+      token: _vaultKey(token),
       ciphertext: ciphertext,
       ttl: ttlVal,
-      ptr_hash: ptHash || undefined
     };
+    if (ptHash) primaryItem.ptr_hash = ptHash;
+    if (metadata) primaryItem.meta_json = JSON.stringify(metadata);
 
     if (ptHash) {
       try {
         await this._client.send(new TransactWriteCommand({
           TransactItems: [
+            { Put: { TableName: this._tableName, Item: primaryItem } },
             {
               Put: {
                 TableName: this._tableName,
-                Item: {
-                  token: `mask:${token}`,
-                  ciphertext: ciphertext,
-                  ttl: ttlVal,
-                  ptr_hash: ptHash
-                }
-              }
-            },
-            {
-              Put: {
-                TableName: this._tableName,
-                Item: {
-                  token: `mask-rev:${ptHash}`,
-                  ciphertext: token,
-                  ttl: ttlVal
-                }
+                Item: { token: _vaultRevKey(ptHash), ciphertext: token, ttl: ttlVal }
               }
             }
           ]
         }));
       } catch (e: any) {
         console.error(`DynamoDB transact_write_items failed: ${e}`);
-        // In both strategies, we must raise for DynamoDB failures to prevent data loss
-        // since we didn't perform the atomic write.
         throw new MaskVaultConnectionError(`DynamoDB atomic write failed: ${e}`);
       }
     } else {
-      // Single store (no reverse index)
       try {
-        await this._client.send(new PutCommand({ TableName: this._tableName, Item: item }));
+        await this._client.send(new PutCommand({ TableName: this._tableName, Item: primaryItem }));
       } catch (e: any) {
         throw new MaskVaultConnectionError(`DynamoDB individual write failed: ${e}`);
       }
@@ -392,12 +416,12 @@ export class DynamoDBVault extends BaseVault {
       const now = Math.floor(Date.now() / 1000);
       const resp = await this._client.send(new GetCommand({
         TableName: this._tableName,
-        Key: { token: `mask-rev:${ptHash}` }
+        Key: { token: _vaultRevKey(ptHash) }
       }));
       const item = resp.Item;
       if (!item) return null;
       if (now > (item.ttl || 0)) {
-        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${ptHash}` } }));
+        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: _vaultRevKey(ptHash) } }));
         return null;
       }
       const token = item.ciphertext;
@@ -414,16 +438,16 @@ export class DynamoDBVault extends BaseVault {
       const now = Math.floor(Date.now() / 1000);
       const resp = await this._client.send(new GetCommand({
         TableName: this._tableName,
-        Key: { token: `mask:${token}` }
+        Key: { token: _vaultKey(token) }
       }));
       const item = resp.Item;
       if (!item) return null;
       if (now > (item.ttl || 0)) {
         const ptHash = item.ptr_hash;
         if (ptHash) {
-          await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${ptHash}` } }));
+          await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: _vaultRevKey(ptHash) } }));
         }
-        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask:${token}` } }));
+        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: _vaultKey(token) } }));
         return null;
       }
       return item.ciphertext;
@@ -438,7 +462,7 @@ export class DynamoDBVault extends BaseVault {
       const { GetCommand } = require('@aws-sdk/lib-dynamodb');
       const resp = await this._client.send(new GetCommand({
         TableName: this._tableName,
-        Key: { token: `mask:${token}` }
+        Key: { token: _vaultKey(token) }
       }));
       return resp.Item?.ptr_hash ?? null;
     } catch { return null; }
@@ -449,13 +473,13 @@ export class DynamoDBVault extends BaseVault {
       const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
       const resp = await this._client.send(new GetCommand({
         TableName: this._tableName,
-        Key: { token: `mask:${token}` }
+        Key: { token: _vaultKey(token) }
       }));
       const item = resp.Item;
       if (item && item.ptr_hash) {
-        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask-rev:${item.ptr_hash}` } }));
+        await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: _vaultRevKey(item.ptr_hash) } }));
       }
-      await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: `mask:${token}` } }));
+      await this._client.send(new DeleteCommand({ TableName: this._tableName, Key: { token: _vaultKey(token) } }));
     } catch (e: any) {
       if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`DynamoDB delete failed: ${e}`);
     }
@@ -484,10 +508,10 @@ export class MemcachedVault extends BaseVault {
   async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null, metadata: Record<string, string> | null = null): Promise<void> {
     try {
         const payload = metadata ? JSON.stringify({ ct: ciphertext, meta: metadata }) : ciphertext;
-        await this._client.set(`mask:${token}`, Buffer.from(payload), { expires: ttlSeconds });
+        await this._client.set(_vaultKey(token), Buffer.from(payload), { expires: ttlSeconds });
         if (ptHash) {
-           await this._client.set(`mask-rev:${ptHash}`, Buffer.from(token), { expires: ttlSeconds });
-           await this._client.set(`mask-hash:${token}`, Buffer.from(ptHash), { expires: ttlSeconds });
+           await this._client.set(_vaultRevKey(ptHash), Buffer.from(token), { expires: ttlSeconds });
+           await this._client.set(_vaultHashKey(token), Buffer.from(ptHash), { expires: ttlSeconds });
         }
     } catch (e) {
         throw new MaskVaultConnectionError(`Memcached error: ${e}`);
@@ -496,14 +520,14 @@ export class MemcachedVault extends BaseVault {
 
   async getPtHashForToken(token: string): Promise<string | null> {
     try {
-      const { value } = await this._client.get(`mask-hash:${token}`);
+      const { value } = await this._client.get(_vaultHashKey(token));
       return value ? value.toString() : null;
     } catch { return null; }
   }
 
   async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
     try {
-        const { value } = await this._client.get(`mask-rev:${ptHash}`);
+        const { value } = await this._client.get(_vaultRevKey(ptHash));
         if (!value) return null;
         const token = value.toString();
         return (await this.retrieve(token)) !== null ? token : null;
@@ -515,8 +539,9 @@ export class MemcachedVault extends BaseVault {
 
   async retrieve(token: string): Promise<string | null> {
     try {
-        const { value } = await this._client.get(`mask:${token}`);
-        return value ? value.toString() : null;
+        const { value } = await this._client.get(_vaultKey(token));
+        if (!value) return null;
+        return _unwrapPayload(value.toString());
     } catch (e) {
         if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`Memcached read failed: ${e}`);
         return null;
@@ -525,12 +550,12 @@ export class MemcachedVault extends BaseVault {
 
   async delete(token: string): Promise<void> {
     try {
-        const { value } = await this._client.get(`mask-hash:${token}`);
+        const { value } = await this._client.get(_vaultHashKey(token));
         const ptHash = value ? value.toString() : null;
-        await this._client.delete(`mask:${token}`);
-        await this._client.delete(`mask-hash:${token}`);
+        await this._client.delete(_vaultKey(token));
+        await this._client.delete(_vaultHashKey(token));
         if (ptHash) {
-          await this._client.delete(`mask-rev:${ptHash}`);
+          await this._client.delete(_vaultRevKey(ptHash));
         }
     } catch (e) {
         if (_getFailStrategy() === 'closed') throw new MaskVaultConnectionError(`Memcached delete failed: ${e}`);

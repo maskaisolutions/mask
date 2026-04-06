@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as cryptoNode from 'crypto';
 import { config } from '../config';
-import { looksLikeToken } from '../core/fpe_utils';
+import { isUnambiguouslySafeToken } from '../core/fpe_utils';
 
 // ---------------------------------------------------------------------------
 // Internal SDK Logger (replaces scattered console.info calls)
@@ -66,18 +66,19 @@ function _makeEvent(
     dataType: string,
     agent: string = "",
     tool: string = "",
-    extra: Record<string, any> | null = null
+    extra: Record<string, any> | null = null,
+    instanceId: string = ""
 ): Record<string, any> {
     const event: Record<string, any> = {
         ts: Date.now() / 1000,
-        action,      // "encode" | "decode" | "expired" | "error"
+        action,
         token,
-        data_type: dataType, // "email" | "phone" | "ssn" | "opaque"
+        data_type: dataType,
         agent,
         tool,
+        instance_id: instanceId,
     };
     if (extra) {
-        // Sanitize extra fields to prevent PII leakage into audit logs
         Object.assign(event, _deepMask(extra));
     }
     return event;
@@ -91,7 +92,7 @@ function _makeEvent(
 function _deepMask(obj: any): any {
     if (obj === null || obj === undefined) return obj;
     if (typeof obj === 'string') {
-        return looksLikeToken(obj) ? obj : "[REDACTED]";
+        return isUnambiguouslySafeToken(obj) ? obj : "[REDACTED]";
     }
     if (typeof obj !== 'object') return obj;
 
@@ -126,6 +127,7 @@ export class AuditLogger {
     // HMAC signature chain state
     private _signingKey!: Buffer;
     private _prevSig!: string;
+    private _instanceId!: string;
 
     private constructor() {
         this._maxBufferSize = config.MASK_AUDIT_MAX_BUFFER_SIZE;
@@ -133,10 +135,17 @@ export class AuditLogger {
 
         // ── HMAC Signature Chain State ─────────────────────────────────────
         // The signing key is derived from MASK_MASTER_KEY so it is tied to
-        // the deployment identity. The genesis hash is all-zeros.
+        // the deployment identity.
+        // The genesis hash is derived from a per-instance UUID4 rather than
+        // all-zeros, allowing SOC 2 auditors to verify chain continuity and
+        // prove that a restarted pod produces a distinct, non-forgeable chain.
         const rawKey = process.env.MASK_MASTER_KEY || process.env.MASK_ENCRYPTION_KEY || '';
         this._signingKey = cryptoNode.createHash('sha256').update(rawKey).digest();
-        this._prevSig = '0'.repeat(64);  // genesis hash (64 hex chars)
+        this._instanceId = cryptoNode.randomUUID();
+        // Genesis = HMAC(signing_key, instance_id) — unique and verifiable per runtime
+        this._prevSig = cryptoNode.createHmac('sha256', this._signingKey)
+            .update(this._instanceId, 'utf-8')
+            .digest('hex');
     }
 
     public static getInstance(): AuditLogger {
@@ -144,6 +153,36 @@ export class AuditLogger {
             this._instance = new AuditLogger();
         }
         return this._instance;
+    }
+
+    private _getOverflowPath(): string {
+        const d = process.env.MASK_SECURE_AUDIT_LOG_DIR || require('os').tmpdir();
+        return path.join(d, `mask_audit_overflow_${this._instanceId}.ndjson`);
+    }
+
+    private _writeOverflow(event: Record<string, any>): void {
+        try {
+            fs.appendFileSync(this._getOverflowPath(), JSON.stringify(event) + '\n', 'utf-8');
+        } catch { /* best effort */ }
+    }
+
+    private _consumeOverflow(events: Record<string, any>[]): void {
+        const overflowPath = this._getOverflowPath();
+        if (!fs.existsSync(overflowPath)) return;
+        const processingPath = overflowPath + '.processing';
+        try {
+            fs.renameSync(overflowPath, processingPath);
+        } catch { return; }
+
+        try {
+            const content = fs.readFileSync(processingPath, 'utf-8');
+            for (const line of content.split('\n')) {
+                if (line.trim()) events.push(JSON.parse(line));
+            }
+            fs.unlinkSync(processingPath);
+        } catch (e) {
+            _logger.error(`Failed to consume overflow: ${e}`);
+        }
     }
 
     public log(
@@ -155,17 +194,17 @@ export class AuditLogger {
         extra: Record<string, any> = {}
     ): void {
         /** Append an event to the memory buffer to be flushed asynchronously. */
-        const event = _makeEvent(action, token, dataType, agent, tool, extra);
+        const event = _makeEvent(action, token, dataType, agent, tool, extra, this._instanceId);
         
         if (this._buffer.length >= this._maxBufferSize) {
             if (!this._bufferFullWarned) {
                 _logger.warn(
-                    `AuditLogger buffer full (max=${this._maxBufferSize}). Performing emergency sync-flush to prevent data loss.`
+                    `AuditLogger buffer full (max=${this._maxBufferSize}). Spooling to disk overflow to prevent OOM.`
                 );
                 this._bufferFullWarned = true;
             }
-            // Emergency sync-flush to stdout to apply backpressure and prevent data loss
-            this._flushSync();
+            this._writeOverflow(event);
+            return;
         }
         
         this._buffer.push(event);
@@ -205,12 +244,15 @@ export class AuditLogger {
     }
 
     private async _flush(): Promise<void> {
-        if (this._isFlushing || this._buffer.length === 0) return;
+        if (this._isFlushing) return;
         this._isFlushing = true;
         try {
             const events = [...this._buffer];
             this._buffer = [];
             this._bufferFullWarned = false;
+
+            this._consumeOverflow(events);
+            if (events.length === 0) return;
 
             // ── Secure File Handler (SOC 2 Audit Trail) ───────────────────
             const secureLogDir = process.env.MASK_SECURE_AUDIT_LOG_DIR || '';
@@ -251,13 +293,49 @@ export class AuditLogger {
         }
     }
 
-    /** Synchronous flush for use in signal handlers where async is unreliable. */
+    /** Synchronous flush for use in signal handlers where async is unreliable.
+     *
+     * Computes HMAC signatures to maintain chain integrity and writes to the
+     * secure ndjson audit file (MASK_SECURE_AUDIT_LOG_DIR) if configured,
+     * ensuring SOC 2 tamper-evidence guarantees hold through process shutdown.
+     */
     private _flushSync(): void {
         if (this._buffer.length === 0) return;
         const events = [...this._buffer];
         this._buffer = [];
+
+        // ── Determine secure file path (mirrors async _flush) ────────────
+        const secureLogDir = process.env.MASK_SECURE_AUDIT_LOG_DIR || '';
+        let secureFilePath: string | null = null;
+        if (secureLogDir) {
+            try {
+                fs.mkdirSync(secureLogDir, { recursive: true });
+                const dateStr = new Date().toISOString().slice(0, 10);
+                secureFilePath = path.join(secureLogDir, `mask-audit-${dateStr}.ndjson`);
+            } catch { /* best effort */ }
+        }
+
         for (const evt of events) {
-            process.stdout.write(JSON.stringify(evt) + '\n');
+            // ── HMAC Signature Chain (same as async _flush) ───────────────
+            const body = JSON.stringify(evt, (_, v) => typeof v === 'bigint' ? v.toString() : v);
+            const sigInput = Buffer.from(this._prevSig + body, 'utf-8');
+            const sig = cryptoNode.createHmac('sha256', this._signingKey).update(sigInput).digest('hex');
+            const signedLine = JSON.stringify({
+                ...evt,
+                prev_sig: this._prevSig,
+                sig,
+            }, (_, v) => typeof v === 'bigint' ? v.toString() : v);
+            this._prevSig = sig;
+
+            // Write to stdout synchronously
+            process.stdout.write(signedLine + '\n');
+
+            // Write to secure ndjson file synchronously
+            if (secureFilePath) {
+                try {
+                    fs.appendFileSync(secureFilePath, signedLine + '\n', { encoding: 'utf-8' });
+                } catch { /* best effort */ }
+            }
         }
     }
 }
