@@ -54,6 +54,8 @@ def __getattr__(name: str):
         return get_env_bool("MASK_STRICT_PROD", False)
     if name == "MASK_BLIND_INDEX_SALT":
         return os.environ.get("MASK_BLIND_INDEX_SALT", "mask-blind-index")
+    if name == "MASK_KDF_SALT":
+        return os.environ.get("MASK_KDF_SALT", "mask-kdf-v4-argon2id")
     if name == "VAULT_TOKEN":
         return os.environ.get("VAULT_TOKEN")
     
@@ -118,6 +120,7 @@ MASK_MASTER_KEY: str
 MASK_ENCRYPTED_KEY: Optional[str]
 MASK_STRICT_PROD: bool
 MASK_BLIND_INDEX_SALT: str
+MASK_KDF_SALT: str
 MASK_VAULT_TYPE: str
 MASK_FAIL_STRATEGY: str
 MASK_VAULT_TTL: int

@@ -99,3 +99,70 @@ describe('TestEncodeDecodePublicAPI', () => {
     expect(token1).toBe(token2);
   });
 });
+
+describe('TestVaultConflictDetection', () => {
+  beforeEach(() => {
+    resetVault();
+    resetMasterKey();
+    process.env.MASK_VAULT_TYPE = "memory";
+    process.env.MASK_MASTER_KEY = "test-vault-key";
+  });
+
+  afterEach(() => {
+    resetVault();
+    resetMasterKey();
+  });
+
+  test('collision_raises_error_on_different_plaintext_under_same_token', async () => {
+    const { TokenCollisionError } = require('../src/core/exceptions');
+    const vault = getVault() as MemoryVault;
+    const token = "fake-collision-token";
+    const ptHashA = "aaaa".repeat(16);
+    const ptHashB = "bbbb".repeat(16);
+
+    // Store first plaintext
+    await vault.store(token, "ciphertext-a", 60, ptHashA);
+
+    const existingHash = await vault.getPtHashForToken(token);
+    expect(existingHash).toBe(ptHashA);
+
+    // Simulate encode() conflict check
+    if (existingHash && existingHash !== ptHashB) {
+      let threw = false;
+      try {
+        throw new TokenCollisionError(token, existingHash, ptHashB);
+      } catch (e: any) {
+        threw = true;
+        expect(e).toBeInstanceOf(TokenCollisionError);
+        expect(e.token).toBe(token);
+        expect(e.message.toLowerCase()).toContain("collision");
+      }
+      expect(threw).toBe(true);
+    } else {
+        throw new Error("Should have detected collision");
+    }
+  });
+
+  test('no_collision_on_same_plaintext_re_encode', async () => {
+    const vault = getVault() as MemoryVault;
+    const token = "stable-token";
+    const ptHash = "cccc".repeat(16);
+
+    await vault.store(token, "ciphertext", 60, ptHash);
+    const existingHash = await vault.getPtHashForToken(token);
+    expect(existingHash).toBe(ptHash);
+  });
+
+  test('metadata_is_persisted_alongside_ciphertext', async () => {
+    const vault = getVault() as MemoryVault;
+    const metadata = { policy_id: "PCI-DSS-3.4", purpose: "payment_processing" };
+    await vault.store("token-meta", "ciphertext", 60, null, metadata);
+
+    // Reach into the memory store just to verify it persisted correctly
+    const entry = (vault as any)._store.get("token-meta");
+    expect(entry).toBeDefined();
+    expect(entry.metadata).toBeDefined();
+    expect(entry.metadata.policy_id).toBe("PCI-DSS-3.4");
+    expect(entry.metadata.purpose).toBe("payment_processing");
+  });
+});

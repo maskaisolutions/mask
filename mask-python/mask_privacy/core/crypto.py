@@ -9,7 +9,6 @@ Requires MASK_ENCRYPTION_KEY to be set in the environment.
 """
 
 import os
-import hmac
 import hashlib
 import logging
 import base64
@@ -55,10 +54,26 @@ class CryptoEngine:
     def _init(self) -> None:
         """Initialize the underlying AES-GCM engine and index secrets.
 
-        The encryption key is retrieved from the active ``KeyProvider``.
-        If no key is available, a throwaway key is auto-generated ONLY
-        when ``config.MASK_DEV_MODE=true`` is explicitly set.
+        Key derivation uses Argon2id (OWASP 2026 baseline):
+          - memory_cost = 19,456 KiB  (19 MiB — primary defence against GPUs/ASICs)
+          - time_cost   = 2 iterations
+          - parallelism = 1
+          - hash_len    = 32 bytes (256-bit AES key)
+
+        The salt comes from MASK_KDF_SALT (env-configurable) + the tenant ID to
+        ensure key isolation between tenants even if they share the same master key.
+
+        If no key is available, a throwaway key is auto-generated ONLY when
+        ``config.MASK_DEV_MODE=true`` is explicitly set.
         """
+        try:
+            from argon2.low_level import hash_secret_raw, Type
+        except ImportError as exc:
+            raise ImportError(
+                "The 'argon2-cffi' package is required for Mask SDK cryptographic operations. "
+                "Install with: pip install 'mask-privacy[crypto]' or pip install argon2-cffi"
+            ) from exc
+
         from mask_privacy.core.key_provider import get_key_provider
 
         provider = get_key_provider()
@@ -66,7 +81,6 @@ class CryptoEngine:
         if not key:
             if config.MASK_DEV_MODE:
                 key = secrets.token_hex(32)
-                # Side effect for any remaining direct os.environ checks (legacy)
                 os.environ["MASK_ENCRYPTION_KEY"] = key
                 logger.warning(
                     "MASK_DEV_MODE is enabled. Using a generated throwaway key. "
@@ -79,22 +93,40 @@ class CryptoEngine:
                     "secret, or set MASK_DEV_MODE=true to use an ephemeral throwaway key."
                 )
 
-        try:
-            # Derive the 32-byte key equivalent to TS: cryptoNode.createHash('sha256').update(key).digest()
-            aes_key = hashlib.sha256(key.encode("utf-8")).digest()
-            self._aesgcm = AESGCM(aes_key)
-        except ValueError as e:
-            raise ValueError(
-                "Failed to initialize AES-GCM engine with the provided key."
-            ) from e
+        # ── Argon2id KDF (OWASP 2026 baseline) ────────────────────────────────
+        # The salt combines the configurable KDF salt with the raw key material
+        # so that different master keys always yield different derived keys.
+        kdf_salt_str = config.MASK_KDF_SALT + "-" + config.MASK_TENANT_ID
+        # Argon2 requires the salt to be exactly 16 bytes
+        kdf_salt_bytes = hashlib.sha256(kdf_salt_str.encode("utf-8")).digest()[:16]
 
-        # Derive a separate secret for blind indexing (HMAC-SHA256)
-        # We derive it from the master encryption key so we don't need a 3rd env var.
+        aes_key = hash_secret_raw(
+            secret=key.encode("utf-8"),
+            salt=kdf_salt_bytes,
+            time_cost=2,
+            memory_cost=19456,  # 19 MiB
+            parallelism=1,
+            hash_len=32,
+            type=Type.ID,
+        )
+        self._aesgcm = AESGCM(aes_key)
+
+        # ── Blind Index Secret ─────────────────────────────────────────────────
+        # A separate Argon2id derivation for HMAC blind-indexing so that
+        # compromise of the AES key does *not* expose the index secret.
         master_key = provider.get_master_key() or key
-        salt = config.MASK_BLIND_INDEX_SALT.encode()
-        self._index_secret = hmac.new(
-            master_key.encode("utf-8"), salt, hashlib.sha256
-        ).digest()
+        index_salt_str = config.MASK_BLIND_INDEX_SALT + "-" + config.MASK_TENANT_ID
+        index_salt_bytes = hashlib.sha256(index_salt_str.encode("utf-8")).digest()[:16]
+
+        self._index_secret = hash_secret_raw(
+            secret=master_key.encode("utf-8"),
+            salt=index_salt_bytes,
+            time_cost=2,
+            memory_cost=19456,
+            parallelism=1,
+            hash_len=32,
+            type=Type.ID,
+        )
 
     def get_index_secret(self) -> bytes:
         """Return the secret used for HMAC-based blind indexing."""

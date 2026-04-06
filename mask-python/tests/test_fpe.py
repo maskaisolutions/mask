@@ -1,11 +1,9 @@
-"""Tests for Format-Preserving Encryption token generation."""
-
 import os
 import re
 
 import pytest
 
-from mask_privacy.core.fpe import generate_fpe_token, looks_like_token, reset_master_key
+from mask_privacy.core.fpe import generate_dp_token as generate_fpe_token, looks_like_token, reset_master_key
 
 
 @pytest.fixture(autouse=True)
@@ -40,21 +38,34 @@ class TestFPETokenGeneration:
 
     def test_ssn_format(self):
         token = generate_fpe_token("123-45-6789")
-        assert token.startswith("000-00-")
-        assert len(token) == 11
-        # Must look like an SSN
+        # High-entropy: all three groups are now randomized.
+        # Format must still be XXX-XX-XXXX.
         assert re.match(r"^\d{3}-\d{2}-\d{4}$", token)
+        # Must NOT preserve the original digits (it's pseudonymized)
+        assert len(token) == 11
 
     def test_cc_format(self):
-        token = generate_fpe_token("4111-1111-1111-1111")
-        assert token.startswith("4000-0000-0000-")
-        assert len(token) == 19
-        assert re.match(r"^(?:\d{4}[ \-]?){3}\d{4}$", token)
+        cc_input = "4111-1111-1111-1111"
+        token = generate_fpe_token(cc_input)
+        # High-entropy PCI DSS format:
+        # - BIN (first 6 digits = 411111) is preserved.
+        # - Middle 6 digits are randomized (10^6 domain).
+        # - Last 4 digits (1111) are preserved from original.
+        assert len(token) == 19  # 4-4-4-4 with dashes
+        assert re.match(r"^(?:\d{4}[\-]?){3}\d{4}$", token)
+        # BIN must be preserved
+        digits = token.replace("-", "")
+        assert digits[:6] == "411111", f"BIN not preserved: {token}"
+        # Last 3 digits of the last 4 must be preserved (the last digit is the Luhn check)
+        assert digits[12:15] == "111", f"Last 3 not preserved: {token}"
+        # Middle 6 must differ from original (randomized)
+        assert digits[6:12] != "111111", f"Middle 6 not randomized: {token}"
 
     def test_routing_format(self):
         token = generate_fpe_token("122000661")
-        assert token.startswith("000000")
+        # High-entropy: all 9 digits are now randomized across 3 groups.
         assert len(token) == 9
+        assert token.isdigit()
         assert re.match(r"^\d{9}$", token)
 
     def test_opaque_fallback(self):
@@ -100,10 +111,14 @@ class TestLooksLikeToken:
         assert looks_like_token("+1-555-1234567") is True
 
     def test_ssn_token(self):
-        assert looks_like_token("000-00-1234") is True
+        # New high-entropy SSN: any XXX-XX-XXXX pattern is a token
+        # (since we randomize all groups now).
+        assert looks_like_token("987-65-4321") is True
 
     def test_cc_token(self):
-        assert looks_like_token("4000-0000-0000-1234") is True
+        # New high-entropy CC: any 4-4-4-4 digit pattern is a token
+        # (BIN+middle6rand+last4 format).
+        assert looks_like_token("4111-1184-7299-1111") is True
 
     def test_routing_token(self):
         assert looks_like_token("000000123") is True

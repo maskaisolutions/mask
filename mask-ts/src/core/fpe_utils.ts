@@ -12,14 +12,14 @@
 export const TOKEN_PATTERN = new RegExp(
   "tkn-[a-f0-9]{8,64}@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}" +            // Email
   "|\\+[1-9]\\d{0,3}-555-\\d{7}" +                                 // Phone
-  "|000-00-\\d{4}" +                                               // SSN
-  "|4000-0000-0000-\\d{4}" +                                       // CC
-  "|000000\\d{3}" +                                                // Routing
-  "|000\\d{5}[A-Z]" +                                              // Spanish DNI token
+  "|\\d{3}-\\d{2}-\\d{4}" +                                        // SSN
+  "|\\d{4}-\\d{4}-\\d{4}-\\d{4}" +                                 // CC
+  "|\\b\\d{9}\\b" +                                                // Routing
+  "|\\b000\\d{5}[A-Z]\\b" +                                        // Spanish DNI token
   "|[A-Z]{2}00[A-F0-9]{4,16}" +                                    // IBAN token
   "|<(?:PER|LOC|ORG):[^>]+>" +                                     // NLP Semantic tokens V4
   "|\\b[A-Z][a-zA-Z, ]+-[0-9]{3,4}\\b" +                           // Bijective Name/Loc
-  "|\\\\[TKN-[a-f0-9]{8,64}\\\\]",                                 // Opaque
+  "|\\[TKN-[^\\]]+\\]",                                            // Opaque
   "g"
 );
 
@@ -43,18 +43,18 @@ export function looksLikeToken(value: string | any): boolean {
     return true;
   }
 
-  // SSN tokens: 000-00-XXXX
-  if (v.startsWith("000-00-") && v.length === 11) {
+  // SSN tokens: XXX-XX-XXXX
+  if (/^\d{3}-\d{2}-\d{4}$/.test(v)) {
     return true;
   }
 
-  // Credit card tokens: 4000-0000-0000-XXXX
-  if (v.startsWith("4000-0000-0000-") && v.length === 19) {
+  // Credit card tokens: XXXX-XXXX-XXXX-XXXX
+  if (/^\d{4}-\d{4}-\d{4}-\d{4}$/.test(v)) {
     return true;
   }
 
-  // Routing tokens: 000000XXX
-  if (v.startsWith("000000") && v.length === 9) {
+  // Routing tokens: XXXXXXXXX
+  if (v.length === 9 && /^\d+$/.test(v)) {
     return true;
   }
 

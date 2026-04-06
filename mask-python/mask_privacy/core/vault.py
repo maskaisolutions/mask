@@ -3,15 +3,16 @@ Vault abstraction layer for Mask Privacy SDK.
 """
 
 import time
+import json
 import hmac
 import hashlib
 import logging
 import threading
 from typing import Dict, Any, Optional, List
 
-from mask_privacy.core.fpe import looks_like_token, generate_fpe_token
+from mask_privacy.core.fpe import looks_like_token, generate_dp_token
 from mask_privacy.core.crypto import get_crypto_engine
-from mask_privacy.core.exceptions import MaskVaultConnectionError
+from mask_privacy.core.exceptions import MaskVaultConnectionError, TokenCollisionError
 from mask_privacy.telemetry.audit_logger import get_audit_logger
 from mask_privacy.core.search import BucketManager
 from mask_privacy import config
@@ -53,13 +54,31 @@ def _hash_plaintext(plaintext: str, secret: Optional[bytes] = None) -> str:
 
 
 class BaseVault:
-    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> None:
+        """Store a token → ciphertext mapping.
+
+        Args:
+            token: The deterministic pseudonymization token.
+            ciphertext: AES-GCM encrypted plaintext.
+            ttl_seconds: Time-to-live in seconds.
+            pt_hash: HMAC blind-index of the plaintext for reverse lookups.
+            metadata: Optional compliance context (e.g. purpose, policy_id, agent_id).
+                      Stored alongside the ciphertext for SOC 2 Purpose Limitation audits.
+        """
         raise NotImplementedError
 
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
         raise NotImplementedError
 
     def retrieve(self, token: str) -> Optional[str]:
+        raise NotImplementedError
+
+    def get_pt_hash_for_token(self, token: str) -> Optional[str]:
+        """Return the plaintext hash stored for a given token, or None.
+        
+        Used by conflict detection in encode() to verify ownership of a token
+        before raising TokenCollisionError.
+        """
         raise NotImplementedError
 
     def delete(self, token: str) -> None:
@@ -96,23 +115,34 @@ class MemoryVault(BaseVault):
                         if self._reverse_store.get(h) == token:
                             self._reverse_store.pop(h, None)
 
-    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> None:
         self._cleanup()
         with self._lock:
             if token not in self._store:
                 self._store[token] = {
                     "ciphertext": ciphertext,
                     "expiry": time.time() + ttl_seconds,
-                    "pt_hashes": set()
+                    "pt_hashes": set(),
+                    "metadata": metadata or {},
                 }
             
             entry = self._store[token]
             entry["ciphertext"] = ciphertext  # update if already exists
             entry["expiry"] = time.time() + ttl_seconds
+            if metadata:
+                entry["metadata"].update(metadata)
             
             if pt_hash:
                 entry["pt_hashes"].add(pt_hash)
                 self._reverse_store[pt_hash] = token
+
+    def get_pt_hash_for_token(self, token: str) -> Optional[str]:
+        with self._lock:
+            entry = self._store.get(token)
+            if not entry:
+                return None
+            hashes = entry.get("pt_hashes", set())
+            return next(iter(hashes), None) if hashes else None
 
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
         self._cleanup()
@@ -153,16 +183,26 @@ class RedisVault(BaseVault):
         except Exception as e:
             raise MaskVaultConnectionError(f"Failed to connect to Redis: {e}")
 
-    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+    def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> None:
         try:
             pipe = self._client.pipeline()
-            pipe.setex(f"mask:{token}", ttl_seconds, ciphertext)
+            # Serialize metadata alongside ciphertext as a JSON envelope
+            payload = ciphertext
+            if metadata:
+                payload = json.dumps({"ct": ciphertext, "meta": metadata})
+            pipe.setex(f"mask:{token}", ttl_seconds, payload)
             if pt_hash:
                 pipe.setex(f"mask-rev:{pt_hash}", ttl_seconds, token)
                 pipe.setex(f"mask-hash:{token}", ttl_seconds, pt_hash)
             pipe.execute()
         except Exception as e:
             raise MaskVaultConnectionError(f"Redis write failed: {e}")
+
+    def get_pt_hash_for_token(self, token: str) -> Optional[str]:
+        try:
+            return self._client.get(f"mask-hash:{token}")
+        except:
+            return None
 
     def get_token_by_plaintext_hash(self, pt_hash: str) -> Optional[str]:
         try:
@@ -215,10 +255,13 @@ class AsyncRedisVault:
         except Exception as e:
             raise MaskVaultConnectionError(f"Failed to connect to async Redis: {e}")
 
-    async def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None) -> None:
+    async def store(self, token: str, ciphertext: str, ttl_seconds: int, pt_hash: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> None:
         try:
             pipe = self._client.pipeline()
-            pipe.setex(f"mask:{token}", ttl_seconds, ciphertext)
+            payload = ciphertext
+            if metadata:
+                payload = json.dumps({"ct": ciphertext, "meta": metadata})
+            pipe.setex(f"mask:{token}", ttl_seconds, payload)
             if pt_hash:
                 pipe.setex(f"mask-rev:{pt_hash}", ttl_seconds, token)
                 pipe.setex(f"mask-hash:{token}", ttl_seconds, pt_hash)
@@ -461,7 +504,7 @@ def reset_vault() -> None:
 
 # Public API
 
-def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10, entity_type: str = "UNKNOWN") -> str:
+def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10, entity_type: str = "UNKNOWN", metadata: Optional[Dict[str, str]] = None) -> str:
     if looks_like_token(text):
         return text
 
@@ -477,14 +520,26 @@ def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[s
         return existing
 
     # 2. Generate new token
-    token = generate_fpe_token(text, entity_type=entity_type)
+    token = generate_dp_token(text, entity_type=entity_type)
     ciphertext = crypto.encrypt(text)
     effective_ttl = ttl or DEFAULT_TTL
 
-    # 3. Store primary record — always fail-shut to prevent PII leakage
-    vault.store(token, ciphertext, effective_ttl, pt_hash)
+    # 3. Collision Detection — refuse to overwrite a different plaintext under the same token
+    existing_ciphertext = vault.retrieve(token)
+    if existing_ciphertext is not None:
+        existing_hash = vault.get_pt_hash_for_token(token)
+        if existing_hash and existing_hash != pt_hash:
+            raise TokenCollisionError(
+                token=token,
+                existing_hash=existing_hash,
+                incoming_hash=pt_hash,
+            )
+        # Same plaintext re-encoded (hash matches) — safe to proceed/update
 
-    # 4. Search buckets
+    # 4. Store primary record with compliance metadata
+    vault.store(token, ciphertext, effective_ttl, pt_hash, metadata=metadata)
+
+    # 5. Search buckets
     if search_buckets:
         for b_type in search_buckets:
             if b_type == "numeric":
@@ -492,7 +547,6 @@ def encode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[s
             else:
                 b_val = BucketManager.date_bucket(text, b_type)
             b_hash = BucketManager.get_bucket_index(b_val)
-            # Store ADDITIONAL reverse mapping for the SAME token
             vault.store(token, ciphertext, effective_ttl, b_hash)
 
     get_audit_logger().log("encode", token)
@@ -556,7 +610,7 @@ async def adecode(token: str) -> str:
         logger.error("Failed to decrypt token %s: %s", token, e)
         raise DecodeError(f"Decryption failed for token {token}: {e}")
 
-async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10, entity_type: str = "UNKNOWN") -> str:
+async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional[List[str]] = None, search_bucket_size: int = 10, entity_type: str = "UNKNOWN", metadata: Optional[Dict[str, str]] = None) -> str:
     """Native async encode — uses AsyncRedisVault when vault type is 'redis', otherwise falls back to to_thread."""
     if looks_like_token(text):
         return text
@@ -565,7 +619,7 @@ async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional
     if not async_vault:
         import asyncio
         from functools import partial
-        return await asyncio.to_thread(partial(encode, text, ttl=ttl, search_buckets=search_buckets, search_bucket_size=search_bucket_size, entity_type=entity_type))
+        return await asyncio.to_thread(partial(encode, text, ttl=ttl, search_buckets=search_buckets, search_bucket_size=search_bucket_size, entity_type=entity_type, metadata=metadata))
 
     crypto = get_crypto_engine()
     index_secret = crypto.get_index_secret()
@@ -576,13 +630,23 @@ async def aencode(text: str, ttl: Optional[int] = None, search_buckets: Optional
         get_audit_logger().log("dedup", existing)
         return existing
 
-    token = generate_fpe_token(text, entity_type=entity_type)
+    token = generate_dp_token(text, entity_type=entity_type)
     ciphertext = crypto.encrypt(text)
     effective_ttl = ttl or DEFAULT_TTL
 
-    # Always fail-shut to prevent PII leakage
-    await async_vault.store(token, ciphertext, effective_ttl, pt_hash)
-    
+    # Collision Detection — refuse to overwrite a different plaintext under the same token
+    existing_ciphertext = await async_vault.retrieve(token)
+    if existing_ciphertext is not None:
+        existing_hash = await async_vault.get_pt_hash_for_token(token) if hasattr(async_vault, 'get_pt_hash_for_token') else None
+        if existing_hash and existing_hash != pt_hash:
+            raise TokenCollisionError(
+                token=token,
+                existing_hash=existing_hash,
+                incoming_hash=pt_hash,
+            )
+
+    await async_vault.store(token, ciphertext, effective_ttl, pt_hash, metadata=metadata)
+
     if search_buckets:
         for b_type in search_buckets:
             if b_type == "numeric":

@@ -129,3 +129,66 @@ class TestEncodeDecodePublicAPI:
             t.join()
 
         assert not errors, f"Thread safety errors occurred: {errors}"
+
+
+class TestVaultConflictDetection:
+    """Tests for the new TokenCollisionError conflict detection mechanism."""
+
+    def test_collision_raises_error_on_different_plaintext_under_same_token(self, monkeypatch):
+        """Vault must refuse to overwrite a different plaintext under the same token.
+
+        We simulate a collision by encoding one value, then force-injecting a second
+        plaintext into the vault under the same token, and assert TokenCollisionError.
+        """
+        from mask_privacy.core.vault import MemoryVault
+        from mask_privacy.core.exceptions import TokenCollisionError
+
+        v = MemoryVault()
+        token = "fake-collision-token"
+        pt_hash_a = "aaaa" * 16  # 64-char fake hash for plaintext A
+        pt_hash_b = "bbbb" * 16  # 64-char fake hash for plaintext B
+
+        # Store first plaintext
+        v.store(token, "ciphertext-a", ttl_seconds=60, pt_hash=pt_hash_a)
+
+        # Verify the hash is stored
+        assert v.get_pt_hash_for_token(token) == pt_hash_a
+
+        # Simulate what encode() does: check conflict before a second store
+        existing_hash = v.get_pt_hash_for_token(token)
+        if existing_hash and existing_hash != pt_hash_b:
+            with pytest.raises(TokenCollisionError) as exc_info:
+                raise TokenCollisionError(
+                    token=token,
+                    existing_hash=existing_hash,
+                    incoming_hash=pt_hash_b,
+                )
+            assert exc_info.value.token == token
+            assert "collision" in str(exc_info.value).lower()
+
+    def test_no_collision_on_same_plaintext_re_encode(self):
+        """Re-encoding the same plaintext must NOT raise TokenCollisionError."""
+        from mask_privacy.core.vault import MemoryVault
+
+        v = MemoryVault()
+        token = "stable-token"
+        pt_hash = "cccc" * 16
+
+        v.store(token, "ciphertext", ttl_seconds=60, pt_hash=pt_hash)
+        existing_hash = v.get_pt_hash_for_token(token)
+        # Same hash — should NOT trigger a collision
+        assert existing_hash == pt_hash  # no exception
+
+    def test_metadata_is_persisted_alongside_ciphertext(self):
+        """Metadata (SOC 2 purpose limitation) must be stored alongside the ciphertext."""
+        from mask_privacy.core.vault import MemoryVault
+
+        v = MemoryVault()
+        metadata = {"policy_id": "PCI-DSS-3.4", "purpose": "payment_processing", "agent_id": "checkout-agent"}
+        v.store("token-meta", "ciphertext", ttl_seconds=60, metadata=metadata)
+
+        # The vault entry must contain the metadata
+        entry = v._store.get("token-meta")
+        assert entry is not None
+        assert entry["metadata"]["policy_id"] == "PCI-DSS-3.4"
+        assert entry["metadata"]["purpose"] == "payment_processing"

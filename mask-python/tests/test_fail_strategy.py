@@ -24,6 +24,7 @@ class TestFailStrategyClosed:
         with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "closed"}):
             mock_vault = MagicMock()
             mock_vault.get_token_by_plaintext_hash.return_value = None
+            mock_vault.retrieve.return_value = None
             mock_vault.store.side_effect = MaskVaultConnectionError("Write failed")
             
             with patch("mask_privacy.core.vault.get_vault", return_value=mock_vault):
@@ -50,6 +51,7 @@ class TestFailStrategyOpen:
         with patch.dict(os.environ, {"MASK_FAIL_STRATEGY": "open"}):
             mock_vault = MagicMock()
             mock_vault.get_token_by_plaintext_hash.return_value = None
+            mock_vault.retrieve.return_value = None
             mock_vault.store.side_effect = MaskVaultConnectionError("Write failed")
             
             with patch("mask_privacy.core.vault.get_vault", return_value=mock_vault):

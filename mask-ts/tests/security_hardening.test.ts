@@ -49,4 +49,30 @@ describe('Security Hardening Verification', () => {
     const result = await client.decode(token);
     expect(result).toBe(token);
   });
+
+  test('verification: argon2id kdf enforcement', async () => {
+    // Verify that the SDK refuses to initialize its CryptoEngine and fails shut
+    // if the 'argon2' package is unavailable.
+    
+    // We must reset the module registry to ensure a fresh evaluation
+    jest.resetModules();
+    
+    // Specifically mock 'argon2' to throw when required, simulating missing dependency
+    jest.doMock('argon2', () => {
+      throw new Error("Cannot find module 'argon2'");
+    });
+
+    const { CryptoEngine } = require('../src/core/crypto');
+
+    // Force a fresh reset of the singleton
+    (CryptoEngine as any)._instance = null;
+    process.env.MASK_ENCRYPTION_KEY = "test-key";
+
+    await expect(async () => {
+        await CryptoEngine.getInstanceAsync();
+    }).rejects.toThrow(/argon2/);
+    
+    // Cleanup mock
+    jest.dontMock('argon2');
+  });
 });

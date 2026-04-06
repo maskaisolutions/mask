@@ -12,6 +12,8 @@ This module provides the SOC2 / HIPAA audit trail.
 import os
 import json
 import time
+import hmac
+import hashlib
 import logging
 import threading
 import signal
@@ -96,6 +98,13 @@ class AuditLogger:
         self._strict_mode = config.MASK_AUDIT_LOG_STRICT
         self._buffer_full_warned = False
         self._handlers_registered = False
+
+        # ── HMAC Signature Chain State ─────────────────────────────────────
+        # The signing key is derived from MASK_MASTER_KEY so it is tied to
+        # the deployment's identity. The genesis hash is all-zeros.
+        _raw_key = os.environ.get("MASK_MASTER_KEY", "") or os.environ.get("MASK_ENCRYPTION_KEY", "")
+        self._signing_key: bytes = hashlib.sha256(_raw_key.encode("utf-8")).digest()
+        self._prev_sig: str = "0" * 64  # genesis hash (64 hex chars)
 
     @classmethod
     def reset(cls) -> None:
@@ -241,28 +250,63 @@ class AuditLogger:
         with self._lock:
             if not self._buffer:
                 return
-            # Create a copy and clear the buffer
             events_to_flush = list(self._buffer)
             self._buffer.clear()
             self._buffer_full_warned = False
 
-        # Log via the dedicated mask.audit logger
-        # Enterprise users can configure this logger's handlers via standard Python logging config
         audit_logger = logging.getLogger("mask.audit")
 
-        # Ensure there is at least a StreamHandler on the audit logger by default
-        # so events are not silently dropped when no logging is configured
+        # ── Secure File Handler (SOC 2 Audit Trail) ─────────────────────────
+        # If MASK_SECURE_AUDIT_LOG_DIR is set, write to a rotating file
+        # in addition to the standard Python logging channel.
+        secure_log_dir = os.environ.get("MASK_SECURE_AUDIT_LOG_DIR", "")
+        secure_file = None
+        if secure_log_dir:
+            os.makedirs(secure_log_dir, exist_ok=True)
+            import datetime
+            date_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+            secure_file_path = os.path.join(secure_log_dir, f"mask-audit-{date_str}.ndjson")
+            try:
+                secure_file = open(secure_file_path, "a", encoding="utf-8")
+            except OSError:
+                pass
+
         if not audit_logger.handlers and not audit_logger.parent.handlers:  # type: ignore[union-attr]
             handler = logging.StreamHandler()
             handler.setFormatter(logging.Formatter("%(message)s"))
             audit_logger.addHandler(handler)
             audit_logger.setLevel(logging.INFO)
 
-        for event in events_to_flush:
-            try:
-                audit_logger.info(json.dumps(event, default=str))
-            except:
-                pass
+        try:
+            for event in events_to_flush:
+                # ── HMAC Signature Chain ─────────────────────────────────────
+                # sig_i = HMAC(signing_key, sig_{i-1} || JSON(event))
+                body = json.dumps(event, default=str, sort_keys=True)
+                sig_input = (self._prev_sig + body).encode("utf-8")
+                sig = hmac.new(self._signing_key, sig_input, hashlib.sha256).hexdigest()
+                signed_line = json.dumps({
+                    **event,
+                    "prev_sig": self._prev_sig,
+                    "sig": sig,
+                }, default=str, sort_keys=True)
+                self._prev_sig = sig
+
+                try:
+                    audit_logger.info(signed_line)
+                except Exception:
+                    pass
+
+                if secure_file:
+                    try:
+                        secure_file.write(signed_line + "\n")
+                    except OSError:
+                        pass
+        finally:
+            if secure_file:
+                try:
+                    secure_file.close()
+                except OSError:
+                    pass
 
 
 def get_audit_logger() -> AuditLogger:

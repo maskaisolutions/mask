@@ -49,6 +49,7 @@ export const config = {
   get MASK_ENCRYPTED_KEY() { return process.env.MASK_ENCRYPTED_KEY || null; },
   get MASK_STRICT_PROD() { return getEnvBool('MASK_STRICT_PROD', false); },
   get MASK_BLIND_INDEX_SALT() { return process.env.MASK_BLIND_INDEX_SALT || "mask-blind-index"; },
+  get MASK_KDF_SALT() { return process.env.MASK_KDF_SALT || "mask-kdf-v4-argon2id"; },
   get VAULT_TOKEN() { return process.env.VAULT_TOKEN || null; },
 
   // --- VAULT & STORAGE ---

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
-import { generateFPEToken, resetMasterKey } from '../src/core/fpe';
+import { generateDPToken as generateFPEToken, resetMasterKey } from '../src/core/fpe';
 import { looksLikeToken } from '../src/core/fpe_utils';
 import { MaskSecurityError } from '../src/core/exceptions';
 import * as process from 'process';
@@ -31,23 +31,30 @@ describe('TestFPETokenGeneration', () => {
 
   test('test_ssn_format', async () => {
     const token = await generateFPEToken("123-45-6789");
-    expect(token.startsWith("000-00-")).toBe(true);
+    // High-entropy: all three groups are now randomized. Format: XXX-XX-XXXX.
     expect(token.length).toBe(11);
     expect(token).toMatch(/^\d{3}-\d{2}-\d{4}$/);
   });
 
   test('test_cc_format', async () => {
     const token = await generateFPEToken("4111-1111-1111-1111");
-    expect(token.startsWith("4000-0000-0000-")).toBe(true);
+    // High-entropy PCI DSS format: BIN(6)+middle6rand+last4, Luhn-valid.
     expect(token.length).toBe(19);
-    expect(token).toMatch(/^(?:\d{4}[ \-]?){3}\d{4}$/);
+    expect(token).toMatch(/^(?:\d{4}[\-]?){3}\d{4}$/);
+    const digits = token.replace(/-/g, '');
+    // BIN (first 6) must be preserved.
+    expect(digits.slice(0, 6)).toBe('411111');
+    // Last 3 digits of the last 4 must be preserved (the last digit is the Luhn check).
+    expect(digits.slice(12, 15)).toBe('111');
+    // Middle 6 must be randomized.
+    expect(digits.slice(6, 12)).not.toBe('111111');
   });
 
   test('test_routing_format', async () => {
     const token = await generateFPEToken("122000661");
-    expect(token.startsWith("000000")).toBe(true);
+    // High-entropy: all 9 digits are now randomized across 3 groups.
     expect(token.length).toBe(9);
-    expect(token).toMatch(/^\d{9}$/);
+    expect(/^\d{9}$/.test(token)).toBe(true);
   });
 
   test('test_opaque_fallback', async () => {
@@ -108,11 +115,13 @@ describe('TestLooksLikeToken', () => {
   });
 
   test('test_ssn_token', () => {
-    expect(looksLikeToken("000-00-1234")).toBe(true);
+    // New high-entropy SSN: any XXX-XX-XXXX pattern is a token.
+    expect(looksLikeToken("987-65-4321")).toBe(true);
   });
 
   test('test_cc_token', () => {
-    expect(looksLikeToken("4000-0000-0000-1234")).toBe(true);
+    // New high-entropy CC: any 4-4-4-4 digit pattern is a token.
+    expect(looksLikeToken("4111-1184-7299-1111")).toBe(true);
   });
 
   test('test_routing_token', () => {

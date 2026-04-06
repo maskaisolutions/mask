@@ -12,10 +12,10 @@
 
 import * as crypto from 'crypto';
 import { config } from '../config';
-import { generateFPEToken } from './fpe';
+import { generateDPToken } from './fpe';
 import { looksLikeToken, TOKEN_PATTERN } from './fpe_utils';
 import { getCryptoEngineAsync } from './crypto';
-import { MaskVaultConnectionError } from './exceptions';
+import { MaskVaultConnectionError, TokenCollisionError } from './exceptions';
 import { getAuditLogger } from '../telemetry/audit_logger';
 import { BucketManager } from './search';
 
@@ -50,14 +50,17 @@ export function _getFailStrategy(): string {
 
 /** Interface every vault backend must implement. */
 export abstract class BaseVault {
-  /** Persist a token → plaintext mapping with a TTL. Optionally save a reverse lookup hash. */
-  abstract store(token: string, plaintext: string, ttlSeconds: number, ptHash?: string | null): Promise<void>;
+  /** Persist a token → encrypted plaintext mapping with a TTL and optional compliance metadata. */
+  abstract store(token: string, plaintext: string, ttlSeconds: number, ptHash?: string | null, metadata?: Record<string, string> | null): Promise<void>;
 
   /** Return the existing unexpired token for a given plaintext hash, or null. */
   abstract getTokenByPlaintextHash(ptHash: string): Promise<string | null>;
 
   /** Return the plaintext for token, or null if missing/expired. */
   abstract retrieve(token: string): Promise<string | null>;
+
+  /** Return the plaintext hash stored for this token (used for collision detection), or null. */
+  abstract getPtHashForToken(token: string): Promise<string | null>;
 
   /** Delete a token and its reverse mapping. */
   abstract delete(token: string): Promise<void>;
@@ -84,7 +87,7 @@ export function _hashPlaintext(plaintext: string, secret?: Buffer): string {
  * Map-backed vault. Fast, but state is lost across processes.
  */
 export class MemoryVault extends BaseVault {
-  private _store: Map<string, { plaintext: string; expiry: number; ptHash: string | null }>;
+  private _store: Map<string, { plaintext: string; expiry: number; ptHash: string | null; metadata: Record<string, string> }>;
   private _reverseStore: Map<string, string>;
 
   constructor() {
@@ -112,12 +115,14 @@ export class MemoryVault extends BaseVault {
     }
   }
 
-  async store(token: string, plaintext: string, ttlSeconds: number, ptHash: string | null = null): Promise<void> {
+  async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null, metadata: Record<string, string> | null = null): Promise<void> {
     this._cleanup();
+    const existing = this._store.get(token);
     this._store.set(token, {
-      plaintext,
+      plaintext: ciphertext,
       expiry: (Date.now() / 1000) + ttlSeconds,
-      ptHash
+      ptHash,
+      metadata: { ...(existing?.metadata || {}), ...(metadata || {}) },
     });
     if (ptHash) {
       this._reverseStore.set(ptHash, token);
@@ -131,6 +136,11 @@ export class MemoryVault extends BaseVault {
       return token;
     }
     return null;
+  }
+
+  async getPtHashForToken(token: string): Promise<string | null> {
+    const entry = this._store.get(token);
+    return entry?.ptHash ?? null;
   }
 
   async retrieve(token: string): Promise<string | null> {
@@ -204,10 +214,12 @@ export class RedisVault extends BaseVault {
     }
   }
 
-  async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null): Promise<void> {
+  async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null, metadata: Record<string, string> | null = null): Promise<void> {
     try {
       const pipeline = this._client.pipeline();
-      pipeline.set(`mask:${token}`, ciphertext, 'EX', ttlSeconds);
+      // Serialize metadata alongside ciphertext as a JSON envelope
+      const payload = metadata ? JSON.stringify({ ct: ciphertext, meta: metadata }) : ciphertext;
+      pipeline.set(`mask:${token}`, payload, 'EX', ttlSeconds);
       if (ptHash) {
         pipeline.set(`mask-rev:${ptHash}`, token, 'EX', ttlSeconds);
         pipeline.set(`mask-hash:${token}`, ptHash, 'EX', ttlSeconds);
@@ -220,6 +232,14 @@ export class RedisVault extends BaseVault {
       }
     } catch (e) {
       throw new MaskVaultConnectionError(`Redis error: ${e}`);
+    }
+  }
+
+  async getPtHashForToken(token: string): Promise<string | null> {
+    try {
+      return await this._client.get(`mask-hash:${token}`);
+    } catch {
+      return null;
     }
   }
 
@@ -413,6 +433,17 @@ export class DynamoDBVault extends BaseVault {
     }
   }
 
+  async getPtHashForToken(token: string): Promise<string | null> {
+    try {
+      const { GetCommand } = require('@aws-sdk/lib-dynamodb');
+      const resp = await this._client.send(new GetCommand({
+        TableName: this._tableName,
+        Key: { token: `mask:${token}` }
+      }));
+      return resp.Item?.ptr_hash ?? null;
+    } catch { return null; }
+  }
+
   async delete(token: string): Promise<void> {
     try {
       const { GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
@@ -450,9 +481,10 @@ export class MemcachedVault extends BaseVault {
     }
   }
 
-  async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null): Promise<void> {
+  async store(token: string, ciphertext: string, ttlSeconds: number, ptHash: string | null = null, metadata: Record<string, string> | null = null): Promise<void> {
     try {
-        await this._client.set(`mask:${token}`, Buffer.from(ciphertext), { expires: ttlSeconds });
+        const payload = metadata ? JSON.stringify({ ct: ciphertext, meta: metadata }) : ciphertext;
+        await this._client.set(`mask:${token}`, Buffer.from(payload), { expires: ttlSeconds });
         if (ptHash) {
            await this._client.set(`mask-rev:${ptHash}`, Buffer.from(token), { expires: ttlSeconds });
            await this._client.set(`mask-hash:${token}`, Buffer.from(ptHash), { expires: ttlSeconds });
@@ -460,6 +492,13 @@ export class MemcachedVault extends BaseVault {
     } catch (e) {
         throw new MaskVaultConnectionError(`Memcached error: ${e}`);
     }
+  }
+
+  async getPtHashForToken(token: string): Promise<string | null> {
+    try {
+      const { value } = await this._client.get(`mask-hash:${token}`);
+      return value ? value.toString() : null;
+    } catch { return null; }
   }
 
   async getTokenByPlaintextHash(ptHash: string): Promise<string | null> {
@@ -539,6 +578,7 @@ export type EncodeOptions = {
     searchBuckets?: ('year' | 'month' | 'day' | 'numeric')[];
     searchBucketSize?: number;
     entityType?: string;
+    metadata?: Record<string, string> | null;
 };
 
 /**
@@ -566,16 +606,26 @@ export async function encode(rawText: string, options: EncodeOptions = {}): Prom
   }
 
   // 2. Generate new token
-  const token = await generateFPEToken(text, options.entityType || 'UNKNOWN');
+  const token = await generateDPToken(text, options.entityType || 'UNKNOWN');
 
   // 3. Encrypt the plaintext before it touches the vault
   const ciphertext = cryptoEngine.encrypt(text);
 
-  // 4. Store with primary reverse lookup hash — always fail-shut to prevent PII leakage
-  const ttl = options.ttl || DEFAULT_TTL;
-  await vault.store(token, ciphertext, ttl, ptHash);
+  // 4. Collision Detection — refuse to overwrite a different plaintext under the same token
+  const existingCiphertext = await vault.retrieve(token);
+  if (existingCiphertext !== null) {
+    const existingHash = await vault.getPtHashForToken(token);
+    if (existingHash && existingHash !== ptHash) {
+      throw new TokenCollisionError(token, existingHash, ptHash);
+    }
+    // Same plaintext re-encoded (hash matches) — safe to proceed/update
+  }
 
-  // 5. Store additional blind indices if buckets are requested
+  // 5. Store with primary reverse lookup hash and optional compliance metadata
+  const ttl = options.ttl || DEFAULT_TTL;
+  await vault.store(token, ciphertext, ttl, ptHash, options.metadata || null);
+
+  // 6. Store additional blind indices if buckets are requested
   if (options.searchBuckets && options.searchBuckets.length > 0) {
       for (const bType of options.searchBuckets) {
           let bucketVal: string;
@@ -586,7 +636,6 @@ export async function encode(rawText: string, options: EncodeOptions = {}): Prom
           }
           const bHash = await BucketManager.getBucketIndex(bucketVal);
           await vault.store(token, ciphertext, ttl, bHash);
-
       }
   }
 

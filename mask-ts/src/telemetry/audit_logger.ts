@@ -9,6 +9,9 @@
  * Provides the SOC2 / HIPAA audit trail.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+import * as cryptoNode from 'crypto';
 import { config } from '../config';
 import { looksLikeToken } from '../core/fpe_utils';
 
@@ -120,10 +123,20 @@ export class AuditLogger {
     private _strictMode: boolean;
     private _bufferFullWarned: boolean = false;
     private _shutdownRegistered: boolean = false;
+    // HMAC signature chain state
+    private _signingKey!: Buffer;
+    private _prevSig!: string;
 
     private constructor() {
         this._maxBufferSize = config.MASK_AUDIT_MAX_BUFFER_SIZE;
         this._strictMode = config.MASK_AUDIT_LOG_STRICT;
+
+        // ── HMAC Signature Chain State ─────────────────────────────────────
+        // The signing key is derived from MASK_MASTER_KEY so it is tied to
+        // the deployment identity. The genesis hash is all-zeros.
+        const rawKey = process.env.MASK_MASTER_KEY || process.env.MASK_ENCRYPTION_KEY || '';
+        this._signingKey = cryptoNode.createHash('sha256').update(rawKey).digest();
+        this._prevSig = '0'.repeat(64);  // genesis hash (64 hex chars)
     }
 
     public static getInstance(): AuditLogger {
@@ -199,10 +212,39 @@ export class AuditLogger {
             this._buffer = [];
             this._bufferFullWarned = false;
 
+            // ── Secure File Handler (SOC 2 Audit Trail) ───────────────────
+            const secureLogDir = process.env.MASK_SECURE_AUDIT_LOG_DIR || '';
+            let secureStream: fs.WriteStream | null = null;
+            if (secureLogDir) {
+                fs.mkdirSync(secureLogDir, { recursive: true });
+                const dateStr = new Date().toISOString().slice(0, 10);
+                const filePath = path.join(secureLogDir, `mask-audit-${dateStr}.ndjson`);
+                try {
+                    secureStream = fs.createWriteStream(filePath, { flags: 'a' });
+                } catch { /* ignore write errors */ }
+            }
+
             for (const evt of events) {
-                // Use a replacer to handle BigInt values which are not JSON-serializable by default
-                const json = JSON.stringify(evt, (_, v) => typeof v === 'bigint' ? v.toString() : v);
-                console.info(json);
+                // ── HMAC Signature Chain ─────────────────────────────────
+                // sig_i = HMAC(signing_key, sig_{i-1} || JSON(event))
+                const body = JSON.stringify(evt, (_, v) => typeof v === 'bigint' ? v.toString() : v);
+                const sigInput = Buffer.from(this._prevSig + body, 'utf-8');
+                const sig = cryptoNode.createHmac('sha256', this._signingKey).update(sigInput).digest('hex');
+                const signedLine = JSON.stringify({
+                    ...evt,
+                    prev_sig: this._prevSig,
+                    sig,
+                }, (_, v) => typeof v === 'bigint' ? v.toString() : v);
+                this._prevSig = sig;
+
+                console.info(signedLine);
+                if (secureStream) {
+                    secureStream.write(signedLine + '\n');
+                }
+            }
+
+            if (secureStream) {
+                secureStream.end();
             }
         } finally {
             this._isFlushing = false;

@@ -61,20 +61,34 @@ export class CryptoEngine {
 
   private async _init(): Promise<void> {
     /**
-     * Initialize the AES-256-GCM engine.
+     * Initialize the AES-256-GCM engine with Argon2id key derivation.
      *
-     * The encryption key is retrieved from the active KeyProvider.
-     * If no key is available, a throwaway key is auto-generated for
-     * local/test/demo use.
+     * Key derivation uses Argon2id (OWASP 2026 baseline):
+     *   - memory: 19,456 KiB (19 MiB — primary defence against GPUs/ASICs)
+     *   - iterations: 2
+     *   - parallelism: 1
+     *   - hashLength: 32 bytes (256-bit AES key)
+     *
+     * Salt is derived from MASK_KDF_SALT (env-configurable) to allow
+     * tenant-level key isolation without a separate environment variable.
      */
+    let argon2: any;
+    try {
+      argon2 = require('argon2');
+    } catch (e) {
+      throw new Error(
+        "The 'argon2' package is required for Mask SDK cryptographic operations. " +
+        "Install with: npm install argon2"
+      );
+    }
+
     const provider = getKeyProvider();
     const keyFromProvider = await provider.getEncryptionKey();
-    
+
     let key: string;
     if (!keyFromProvider) {
       if (config.MASK_DEV_MODE) {
         key = cryptoNode.randomBytes(32).toString('base64');
-        // We can't easily write back to config exports, but we can update process.env for the legacy path below
         process.env.MASK_ENCRYPTION_KEY = key;
         console.warn(
           "MASK_DEV_MODE is enabled. Using a generated throwaway key. " +
@@ -90,16 +104,37 @@ export class CryptoEngine {
       key = keyFromProvider;
     }
 
-    // Derive a 32-byte AES key from the provided key material.
-    // This normalises any key format (Fernet base64, raw base64, etc.)
-    // into a consistent 32-byte key via SHA-256 derivation.
-    this._aesKey = cryptoNode.createHash('sha256').update(key).digest();
+    // ── Argon2id KDF (OWASP 2026 baseline) ────────────────────────────────
+    // Salt must be at least 8 bytes; we use SHA-256(MASK_KDF_SALT) truncated to 16 bytes
+    // to match the Python implementation exactly.
+    const kdfSaltStr = config.MASK_KDF_SALT + "-" + config.MASK_TENANT_ID;
+    const kdfSaltBytes = cryptoNode.createHash('sha256').update(kdfSaltStr).digest().subarray(0, 16);
 
-    // Derive a separate secret for blind indexing (HMAC-SHA256)
-    // We derive it from the master encryption key so we don't need a 3rd env var.
+    this._aesKey = await argon2.hash(key, {
+      type: argon2.argon2id,
+      memoryCost: 19456,  // 19 MiB
+      timeCost: 2,
+      parallelism: 1,
+      hashLength: 32,
+      salt: kdfSaltBytes,
+      raw: true,           // return a Buffer, not a hash string
+    }) as Buffer;
+
+    // ── Blind Index Secret (separate Argon2id derivation) ─────────────────
+    // Derived independently so compromising the AES key does not expose search indexes.
     const masterKey = await provider.getMasterKey() || key;
-    const salt = config.MASK_BLIND_INDEX_SALT;
-    this._indexSecret = cryptoNode.createHmac('sha256', masterKey).update(salt).digest();
+    const indexSaltStr = config.MASK_BLIND_INDEX_SALT + "-" + config.MASK_TENANT_ID;
+    const indexSaltBytes = cryptoNode.createHash('sha256').update(indexSaltStr).digest().subarray(0, 16);
+
+    this._indexSecret = await argon2.hash(masterKey, {
+      type: argon2.argon2id,
+      memoryCost: 19456,
+      timeCost: 2,
+      parallelism: 1,
+      hashLength: 32,
+      salt: indexSaltBytes,
+      raw: true,
+    }) as Buffer;
   }
 
   /** Return the secret used for HMAC-based blind indexing. */
