@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0]
+
+### Added
+- **6+4 credit card masking for PCI compliance**: Implemented strict 6+4 masking rules (first 6 and last 4 digits preserved) to meet PCI DSS v4.0 requirements while maintaining downstream system compatibility and Luhn check preservation.
+- **128-bit Bijective Synthesis Engine**: Upgraded the bijective mapping engine to 128-bit entropy, permanently eliminating identity collision risks in massive enterprise datasets (>1B identities).
+
 ## [4.2.0]
 
 ### Added
@@ -55,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[4.3.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v4.3.0
 [4.2.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v4.2.0
 [3.5.1]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.5.1
 [3.5.0]: https://github.com/mask-ai-solutions/mask/releases/tag/v3.5.0

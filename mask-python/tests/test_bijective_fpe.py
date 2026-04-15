@@ -74,7 +74,7 @@ def test_synthesis_human_readability():
     res = generate_fpe_token("Jane Doe", "PERSON")
     # Bijective tokens should be roughly "Name Surname-Tag"
     assert "-" in res, f"Token {res} does not match expected Bijective pattern"
-    assert len(res.split("-")[-1]) == 4, "Bijective token numeric tag should be 4 digits"
+    assert len(res.split("-")[-1]) == 10, "Bijective token numeric tag should be 10 digits"
 
 def test_location_synthesis():
     """Verify bijective location synthesis."""
@@ -82,4 +82,4 @@ def test_location_synthesis():
     # Bijective location pattern: CityName-Tag (3 digits)
     assert "-" in res
     tag = res.split("-")[-1]
-    assert len(tag) >= 3, f"Location tag {tag} should be at least 3 digits"
+    assert len(tag) == 10, f"Location tag {tag} should be exactly 10 digits"

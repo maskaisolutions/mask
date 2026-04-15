@@ -86,43 +86,54 @@ def _get_bijective_tweak() -> bytes:
 
 def _encrypt_bijective_ff1(text: str) -> int:
     canonical = text.lower().strip()
-    # Hash to 64-bit int, then to 20-digit string
-    input_str = str(int.from_bytes(hashlib.sha256(canonical.encode()).digest()[:8], "big")).zfill(20)
+    # Hash to 128-bit int (16 bytes), then to 40-digit string for FF1 seeding.
+    # This prevents collisions in billion-row datasets by expanding the input entropy.
+    h = hashlib.sha256(canonical.encode()).digest()[:16]
+    input_int = int.from_bytes(h, "big")
+    input_str = str(input_int).zfill(40)
     engine = FF1(_get_aes_key(), _get_bijective_tweak(), 10)
-    cipher_str = engine.encrypt(input_str)
-    return int(cipher_str) % (2**64)
+    cipher_int = int(engine.encrypt(input_str))
+    # We return the full cipher integer to the renderer.
+    return cipher_int
 
 def _render_bijective_person(bits: int) -> str:
-    # Bit allocation: First(11) + Conn(6) + Root(12) + Suffix(9) + Tag(14) = 52 bits
+    # Bit allocation (128-bit space): 
+    # First(11) + Conn(6) + Root(12) + Suffix(9) + Tag(40) + Format(4) = 82 bits
     first_idx = bits & 0x7FF
     conn_idx = (bits >> 11) & 0x3F
     root_idx = (bits >> 17) & 0xFFF
     suffix_idx = (bits >> 29) & 0x1FF
-    tag = (bits >> 38) & 0x3FFF
-    format_idx = (bits >> 52) & 0xF
+    tag = (bits >> 38) & 0xFFFFFFFFFF
+    format_idx = (bits >> 78) & 0xF
     
     first = _BIJECTIVE_NAMES[first_idx % len(_BIJECTIVE_NAMES)]
     conn = _BIJECTIVE_CONNECTORS[conn_idx % len(_BIJECTIVE_CONNECTORS)]
     root = _BIJECTIVE_ROOTS[root_idx % len(_BIJECTIVE_ROOTS)]
     suffix = _BIJECTIVE_SUFFIXES[suffix_idx % len(_BIJECTIVE_SUFFIXES)]
-    numeric = tag % 10000
+    
+    # 10-digit numeric tag provides ~33 bits of entropy, pushing total rendered
+    # entropy to ~71 bits (safe for ~48 billion records).
+    numeric = tag % 10000000000
     
     surname = f"{root}{suffix}"
-    if format_idx == 0: return f"{first} {conn} {surname}-{numeric:04d}"
-    if format_idx == 1: return f"{surname}, {first}-{numeric:04d}"
-    if format_idx == 2: return f"{first[0]}. {surname}-{numeric:04d}"
-    return f"{first} {surname}-{numeric:04d}"
+    if format_idx == 0: return f"{first} {conn} {surname}-{numeric:010d}"
+    if format_idx == 1: return f"{surname}, {first}-{numeric:010d}"
+    if format_idx == 2: return f"{first[0]}. {surname}-{numeric:010d}"
+    return f"{first} {surname}-{numeric:010d}"
 
 def _render_bijective_location(bits: int) -> str:
+    # Expanded tag for locations (40 bits)
     s1, s2, s3 = bits & 0x3FF, (bits >> 10) & 0x3FF, (bits >> 20) & 0x3FF
-    tag = (bits >> 30) & 0xFFF
+    tag = (bits >> 30) & 0xFFFFFFFFFF
     city = f"{_BIJECTIVE_SYLLABLES[s1 % 1000]}{_BIJECTIVE_SYLLABLES[s2 % 1000].lower()}{_BIJECTIVE_SYLLABLES[s3 % 1000].lower()}"
-    return f"{city}-{tag:03d}"
+    return f"{city}-{tag % 10000000000:010d}"
 
 # Formatting & Luhn
 def _compute_luhn_digit(partial_num: str) -> str:
     digits = [int(x) for x in partial_num]
     sum_ = 0
+    # Process from right to left.
+    # If partial_num is 15 digits, the first one encountered (index 14) is weight 2.
     should_double = True
     for digit in reversed(digits):
         if should_double:
@@ -131,6 +142,21 @@ def _compute_luhn_digit(partial_num: str) -> str:
         sum_ += digit
         should_double = not should_double
     return str((10 - (sum_ % 10)) % 10)
+
+def _get_luhn_sum(num_str: str) -> int:
+    """Calculate the Luhn sum for a full number (e.g. 16 digits).
+    Assumes weight 1 for the rightmost digit (index 15).
+    """
+    digits = [int(x) for x in num_str]
+    sum_ = 0
+    should_double = False # Index 15 is W1
+    for digit in reversed(digits):
+        if should_double:
+            digit *= 2
+            if digit > 9: digit -= 9
+        sum_ += digit
+        should_double = not should_double
+    return sum_
 
 def _compute_es_id_check(num: int) -> str:
     return "TRWAGMYFPDXBNJZSQVHLCKE"[num % 23]
@@ -170,14 +196,21 @@ def generate_dp_token(raw_text: str, entity_type: str = "UNKNOWN") -> str:
     if type_ in ("CREDIT_CARD", "CREDIT_CARD_NUMBER"):
         digits = _strip_cc_separators(text)
         if len(digits) == 16:
-            bin6 = digits[:6]
-            last4 = digits[12:16]
-            middle6 = digits[6:12]
+            # PCI DSS v4.0.3.3 Compliance: Reveal First 6 and Last 4 ONLY.
+            # Middle 6 digits are encrypted, with Luhn-sum correction for index 11.
+            prefix6 = digits[:6]
+            suffix4 = digits[12:16]
+            middle5 = digits[6:11]
+            
             engine = FF1(_get_aes_key(), b"CREDIT_CARD", 10)
-            enc_middle = engine.encrypt(middle6)
-            base15 = bin6 + enc_middle + last4[:3]  # 15 digits for Luhn input
-            check = _compute_luhn_digit(base15)
-            full = bin6 + enc_middle + last4[:3] + check
+            enc_middle5 = engine.encrypt(middle5)
+            
+            # Find correction digit for index 11 (weight 1)
+            draft = prefix6 + enc_middle5 + '0' + suffix4
+            s = _get_luhn_sum(draft)
+            correction = (10 - (s % 10)) % 10
+            
+            full = prefix6 + enc_middle5 + str(correction) + suffix4
             return f"{full[:4]}-{full[4:8]}-{full[8:12]}-{full[12:16]}"
         else:
             # Fallback length
@@ -245,7 +278,7 @@ TOKEN_PATTERN = re.compile(
     r"|[A-Z]{2}00[A-F0-9]{4,16}"  
     r"|<(?:PER|LOC|ORG):[^>]+>"
     r"|\[TKN-[^\]]+\]"
-    r"|\b[A-Z][a-zA-Z, ]+-[0-9]{3,4}\b"  
+    r"|\b[A-Z][a-zA-Z, ]+-[0-9]{3,10}\b"  
 )
 
 def looks_like_token(value: str) -> bool:
@@ -257,9 +290,10 @@ def looks_like_token(value: str) -> bool:
     if len(v) == 9 and v.isdigit(): return True
     if len(v) >= 8 and v[:2].isalpha() and v[2:4] == "00": return True
     if re.match(r"^000\d{5}[A-Z]$", v): return True
+    if re.match(r"^000\d{5}[A-Z]$", v): return True
     if re.match(r"^<(PER|LOC|ORG):[^>]+>$", v): return True
     if v.startswith("[TKN-") and v.endswith("]"): return True
-    if re.match(r"^[A-Z][a-zA-Z, ]+-[0-9]{3,4}$", v): return True
+    if re.match(r"^[A-Z][a-zA-Z, ]+-[0-9]{3,10}$", v): return True
     return False
 
 
@@ -290,8 +324,8 @@ def is_unambiguously_safe_token(value: str) -> bool:
     if re.match(r"^<(PER|LOC|ORG):[^>]+>$", v): return True
     # Opaque fallback tokens: [TKN-...]
     if v.startswith("[TKN-") and v.endswith("]"): return True
-    # Bijective Name/Location tokens: always end -DDDD (synthetic pattern)
-    if re.match(r"^[A-Z][a-zA-Z, ]+-[0-9]{3,4}$", v): return True
+    # Bijective Name/Location tokens: end with synthetic numeric tag
+    if re.match(r"^[A-Z][a-zA-Z, ]+-[0-9]{3,10}$", v): return True
     # NOTE: Raw SSN (\d{3}-\d{2}-\d{4}), CC (\d{4}-\d{4}-\d{4}-\d{4}),
     # and routing (\d{9}) patterns are intentionally EXCLUDED because real
     # PII shares these exact formats. Use looks_like_token() only for

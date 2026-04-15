@@ -18,7 +18,7 @@ export const TOKEN_PATTERN = new RegExp(
   "|\\b000\\d{5}[A-Z]\\b" +                                        // Spanish DNI token
   "|[A-Z]{2}00[A-F0-9]{4,16}" +                                    // IBAN token
   "|<(?:PER|LOC|ORG):[^>]+>" +                                     // NLP Semantic tokens V4
-  "|\\b[A-Z][a-zA-Z, ]+-[0-9]{3,4}\\b" +                           // Bijective Name/Loc
+  "|\\b[A-Z][a-zA-Z, ]+-[0-9]{3,10}\\b" +                          // Bijective Name/Loc
   "|\\[TKN-[^\\]]+\\]",                                            // Opaque
   "g"
 );
@@ -84,7 +84,7 @@ export function looksLikeToken(value: string | any): boolean {
   if (v.includes("-") && v.length >= 6) {
     const parts = v.split("-");
     const tag = parts[parts.length - 1];
-    if (tag.length === 4 && /^\d+$/.test(tag)) {
+    if (tag.length >= 3 && tag.length <= 10 && /^\d+$/.test(tag)) {
         return true;
     }
   }
@@ -130,8 +130,8 @@ export function isUnambiguouslySafeToken(value: string | any): boolean {
   // Opaque fallback tokens: [TKN-...]
   if (v.startsWith("[TKN-") && v.endsWith("]")) return true;
 
-  // Bijective Name/Location tokens: always end -DDDD (synthetic pattern)
-  if (/^[A-Z][a-zA-Z, ]+-[0-9]{3,4}$/.test(v)) return true;
+  // Bijective Name/Location tokens: end with synthetic numeric tag
+  if (/^[A-Z][a-zA-Z, ]+-[0-9]{3,10}$/.test(v)) return true;
 
   // NOTE: Raw SSN (\d{3}-\d{2}-\d{4}), CC (\d{4}-\d{4}-\d{4}-\d{4}),
   // and routing (\d{9}) patterns are intentionally EXCLUDED because real

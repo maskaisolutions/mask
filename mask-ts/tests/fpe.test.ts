@@ -44,8 +44,8 @@ describe('TestFPETokenGeneration', () => {
     const digits = token.replace(/-/g, '');
     // BIN (first 6) must be preserved.
     expect(digits.slice(0, 6)).toBe('411111');
-    // Last 3 digits of the last 4 must be preserved (the last digit is the Luhn check).
-    expect(digits.slice(12, 15)).toBe('111');
+    // Last 4 digits (1111) must be preserved from original.
+    expect(digits.slice(12, 16)).toBe('1111');
     // Middle 6 must be randomized.
     expect(digits.slice(6, 12)).not.toBe('111111');
   });

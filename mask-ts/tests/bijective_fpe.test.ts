@@ -93,7 +93,7 @@ describe('BijectiveFPEIntegration', () => {
     // Pattern: Name Surname-Tag (4 digits)
     expect(res).toContain("-");
     const parts = res.split("-");
-    expect(parts[parts.length - 1].length).toBe(4);
+    expect(parts[parts.length - 1].length).toBe(10);
   });
 
   test('test_location_synthesis', async () => {
@@ -102,6 +102,6 @@ describe('BijectiveFPEIntegration', () => {
     // Pattern: CityName-Tag (12 bits -> 3-4 digits)
     expect(res).toContain("-");
     const tag = res.split("-").pop()!;
-    expect(tag.length).toBeGreaterThanOrEqual(3);
+    expect(tag.length).toBe(10);
   });
 });

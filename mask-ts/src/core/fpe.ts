@@ -91,39 +91,44 @@ async function _getBijectiveTweak(): Promise<Buffer> {
 async function _encryptBijectiveFF1(text: string): Promise<bigint> {
   const canonical = text.toLowerCase().trim();
   const hash = crypto.createHash('sha256').update(canonical, 'utf-8').digest();
-  // Hash to 64-bit int, then to 20-digit string
-  const inputInt = hash.readBigUInt64BE(0);
-  const inputStr = inputInt.toString().padStart(20, '0');
+  
+  // Upgrade to 128-bit entropy (16 bytes) to prevent collisions in enterprise datasets.
+  const hash128 = hash.subarray(0, 16);
+  // BigInt in JS handles 128-bit integers natively.
+  const inputInt = hash128.readBigUInt64BE(0) << 64n | hash128.readBigUInt64BE(8);
+  const inputStr = inputInt.toString().padStart(40, '0');
   
   const aesKey = await _getAesKey();
   const tweak = await _getBijectiveTweak();
   const engine = new FF1(aesKey, tweak, 10);
   
   const cipherStr = engine.encrypt(inputStr);
-  return BigInt(cipherStr) % (2n ** 64n);
+  return BigInt(cipherStr);
 }
 
 function _renderBijectivePerson(bits: bigint): string {
-  const firstIdx = Number(bits & 0x7FFn);          // 11 bits (2048)
-  const connIdx = Number((bits >> 11n) & 0x3Fn);    // 6 bits (64)
-  const rootIdx = Number((bits >> 17n) & 0xFFFn);    // 12 bits (4096)
-  const suffixIdx = Number((bits >> 29n) & 0x1FFn); // 9 bits (512)
-  const tag = Number((bits >> 38n) & 0x3FFFn);      // 14 bits (16384)
-  const formatIdx = Number((bits >> 52n) & 0xFn);   // 4 bits (16)
+  // Bit allocation (128-bit space): 
+  // First(11) + Conn(6) + Root(12) + Suffix(9) + Tag(40) + Format(4) = 82 bits
+  const firstIdx = Number(bits & 0x7FFn);
+  const connIdx = Number((bits >> 11n) & 0x3Fn);
+  const rootIdx = Number((bits >> 17n) & 0xFFFn);
+  const suffixIdx = Number((bits >> 29n) & 0x1FFn);
+  const tag = bits >> 38n & 0xFFFFFFFFFFn;
+  const formatIdx = Number((bits >> 78n) & 0xFn);
 
   const first = _BIJECTIVE_NAMES[firstIdx % _BIJECTIVE_NAMES.length];
   const conn = _BIJECTIVE_CONNECTORS[connIdx % _BIJECTIVE_CONNECTORS.length];
   const root = _BIJECTIVE_ROOTS[rootIdx % _BIJECTIVE_ROOTS.length];
   const suffix = _BIJECTIVE_SUFFIXES[suffixIdx % _BIJECTIVE_SUFFIXES.length];
   const surname = `${root}${suffix}`;
-  const numeric = tag % 10000;
-
-  const paddedNumeric = numeric.toString().padStart(4, '0');
+  
+  // Expanded 10-digit tag (33 bits of entropy) ensures enterprise-grade collision avoidance.
+  const numeric = Number(tag % 10000000000n);
+  const paddedNumeric = numeric.toString().padStart(10, '0');
 
   if (formatIdx === 0) return `${first} ${conn} ${surname}-${paddedNumeric}`;
   if (formatIdx === 1) return `${surname}, ${first}-${paddedNumeric}`;
   if (formatIdx === 2) return `${first[0]}. ${surname}-${paddedNumeric}`;
-  if (formatIdx === 3) return `${first} ${surname}-${paddedNumeric}`;
   
   return `${first} ${surname}-${paddedNumeric}`;
 }
@@ -132,10 +137,10 @@ function _renderBijectiveLocation(bits: bigint): string {
   const s1 = Number(bits & 0x3FFn);
   const s2 = Number((bits >> 10n) & 0x3FFn);
   const s3 = Number((bits >> 20n) & 0x3FFn);
-  const tag = Number((bits >> 30n) & 0xFFFn);
+  const tag = bits >> 30n & 0xFFFFFFFFFFn;
 
   const city = `${_BIJECTIVE_SYLLABLES[s1 % 1000]}${_BIJECTIVE_SYLLABLES[s2 % 1000].toLowerCase()}${_BIJECTIVE_SYLLABLES[s3 % 1000].toLowerCase()}`;
-  return `${city}-${tag.toString().padStart(3, '0')}`;
+  return `${city}-${(Number(tag % 10000000000n)).toString().padStart(10, '0')}`;
 }
 
 function _computeLuhnDigit(partialNum: string): string {
@@ -152,6 +157,22 @@ function _computeLuhnDigit(partialNum: string): string {
         shouldDouble = !shouldDouble;
     }
     return ((10 - (sum % 10)) % 10).toString();
+}
+
+export function _getLuhnSum(numStr: string): number {
+    const digits = numStr.split("").map(Number);
+    let sum = 0;
+    let shouldDouble = false; // Index 15 is W1
+    for (let i = digits.length - 1; i >= 0; i--) {
+        let digit = digits[i];
+        if (shouldDouble) {
+            digit *= 2;
+            if (digit > 9) digit -= 9;
+        }
+        sum += digit;
+        shouldDouble = !shouldDouble;
+    }
+    return sum;
 }
 
 function _computeEsIdCheck(num: number): string {
@@ -206,16 +227,20 @@ export async function generateDPToken(rawText: string, entityType: string = 'UNK
   if (type === "CREDIT_CARD" || type === "CREDIT_CARD_NUMBER") {
     const digits = _stripCcSeparators(text);
     if (digits.length === 16) {
-      const bin6 = digits.slice(0, 6);
-      const last4 = digits.slice(12, 16);
-      const middle6 = digits.slice(6, 12);
+      // PCI DSS v4.0.3.3 Compliance: Reveal First 6 and Last 4 ONLY.
+      // Luhn-sum correction ensures downstream validity without disclosing middle data.
+      const prefix6 = digits.slice(0, 6);
+      const suffix4 = digits.slice(12, 16);
+      const middle5 = digits.slice(6, 11);
       
       const engine = new FF1(await _getAesKey(), Buffer.from("CREDIT_CARD"), 10);
-      const encMiddle = engine.encrypt(middle6);
+      const encMiddle5 = engine.encrypt(middle5);
       
-      const base15 = bin6 + encMiddle + last4.slice(0, 3);
-      const checkDig = _computeLuhnDigit(base15);
-      const full = bin6 + encMiddle + last4.slice(0, 3) + checkDig;
+      const draft = prefix6 + encMiddle5 + '0' + suffix4;
+      const sum = _getLuhnSum(draft);
+      const correction = (10 - (sum % 10)) % 10;
+      
+      const full = prefix6 + encMiddle5 + correction.toString() + suffix4;
       return `${full.slice(0, 4)}-${full.slice(4, 8)}-${full.slice(8, 12)}-${full.slice(12, 16)}`;
     } else {
       const fallbackDigits = digits.padEnd(16, '0').slice(0, 16);

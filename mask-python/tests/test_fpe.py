@@ -56,8 +56,8 @@ class TestFPETokenGeneration:
         # BIN must be preserved
         digits = token.replace("-", "")
         assert digits[:6] == "411111", f"BIN not preserved: {token}"
-        # Last 3 digits of the last 4 must be preserved (the last digit is the Luhn check)
-        assert digits[12:15] == "111", f"Last 3 not preserved: {token}"
+        # Last 4 digits (1111) must be preserved from original.
+        assert digits[12:16] == "1111", f"Last 4 not preserved: {token}"
         # Middle 6 must differ from original (randomized)
         assert digits[6:12] != "111111", f"Middle 6 not randomized: {token}"
 
